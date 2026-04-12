@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+pip-wheel-metadata/
+
+# Build artifacts
+build/
+dist/
+release/
+installer/Output/
+*.spec.tmp
+.venv/
+venv/
+env/
+
+# Runtime data
+logs/
+screenshots/
+users/default/preferences.yaml
+users/default/provider_settings.json
+users/default/scheduled_jobs.json
+users/default/user_custom_prompt.md
+
+# Local app data and secrets
+Secrets/
+*.log
+.env
+.env.*
+*.local
+*.tmp
+*.bak
+*.orig
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
