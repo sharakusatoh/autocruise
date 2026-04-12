@@ -78,6 +78,10 @@ Default shortcuts:
 - Pause / Resume: `F8`
 - Stop: `F12`
 
+Scheduled runs are supported through Windows Task Scheduler. The packaged app accepts:
+
+`--run-task <task_id>`
+
 ## Build
 
 To build the Windows package from source:
@@ -87,6 +91,20 @@ build_windows.bat
 ```
 
 This produces the packaged output under `release/`. Those build artifacts are intentionally excluded from Git tracking and should be distributed through GitHub Releases.
+
+The packaged executable is:
+
+`release\AutoCruiseCE\AutoCruiseCE.exe`
+
+Typical release outputs:
+
+- unpacked app folder under `release\AutoCruiseCE\`
+- portable archive under `release\AutoCruiseCE-portable-<version>.zip`
+- installer output when Inno Setup is available
+
+## UI Preview
+
+![AutoCruise CE home UI](docs/ui-renewal-home.png)
 
 ## Included Prompt Assets
 

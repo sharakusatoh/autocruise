@@ -1,0 +1,2 @@
+"""Windows adapters for AutoCruise."""
+

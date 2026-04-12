@@ -1,0 +1,110 @@
+@echo off
+setlocal
+
+cd /d "%~dp0"
+
+set "APP_NAME=AutoCruiseCE"
+set "SPEC_FILE=%~dp0AutoCruise.spec"
+set "RELEASE_DIR=%~dp0release"
+set "BUILD_ROOT=%~dp0build"
+set "BUILD_DIR=%~dp0build\pyinstaller"
+set "INSTALLER_SCRIPT=%~dp0installer\AutoCruiseCE.iss"
+set "INSTALLER_DIR=%RELEASE_DIR%\installer"
+
+for /f %%i in ('python -c "import sys; sys.path.insert(0, r'%~dp0src'); from autocruise.version import APP_VERSION; print(APP_VERSION, end='') "') do set "APP_VERSION=%%i"
+if "%APP_VERSION%"=="" set "APP_VERSION=1.0.0"
+
+if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
+if not exist "%INSTALLER_DIR%" mkdir "%INSTALLER_DIR%"
+
+if exist "%RELEASE_DIR%\%APP_NAME%" (
+  rmdir /s /q "%RELEASE_DIR%\%APP_NAME%"
+)
+if exist "%RELEASE_DIR%\AutoCruise" (
+  rmdir /s /q "%RELEASE_DIR%\AutoCruise"
+)
+if exist "%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip" (
+  del /q "%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip"
+)
+for %%F in ("%RELEASE_DIR%\AutoCruise-portable-*.zip") do (
+  if exist "%%~fF" del /q "%%~fF"
+)
+if exist "%INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe" (
+  del /q "%INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe"
+)
+
+if exist "%BUILD_DIR%" (
+  rmdir /s /q "%BUILD_DIR%"
+)
+if exist "%BUILD_ROOT%" (
+  rmdir /s /q "%BUILD_ROOT%"
+)
+
+python -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+  echo PyInstaller is not installed.
+  echo Install it with: python -m pip install pyinstaller
+  exit /b 1
+)
+
+if exist "%~dp0autocruise_logo.png" (
+  echo Preparing application icon...
+  python -c "from PySide6.QtGui import QImage; import sys; img=QImage(r'%~dp0autocruise_logo.png'); sys.exit(0 if (not img.isNull() and img.save(r'%~dp0autocruise_logo.ico')) else 1)"
+  if errorlevel 1 (
+    echo Failed to generate autocruise_logo.ico from autocruise_logo.png
+    exit /b 1
+  )
+)
+
+echo Building %APP_NAME%...
+python -m PyInstaller --noconfirm --clean "%SPEC_FILE%" --distpath "%RELEASE_DIR%" --workpath "%BUILD_DIR%"
+if errorlevel 1 (
+  echo Build failed.
+  exit /b 1
+)
+
+copy /Y "%~dp0README.md" "%RELEASE_DIR%\%APP_NAME%\README.md" >nul
+
+echo Creating portable ZIP...
+powershell -NoProfile -Command "Compress-Archive -Path '%RELEASE_DIR%\%APP_NAME%' -DestinationPath '%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip' -Force"
+if errorlevel 1 (
+  echo Failed to create portable ZIP.
+  exit /b 1
+)
+
+where iscc >nul 2>&1
+if errorlevel 1 (
+  echo Inno Setup was not found. Skipping installer build.
+  echo To build Setup.exe, install Inno Setup and rerun this script.
+) else (
+  echo Building Windows installer...
+  iscc /Qp /DAppVersion=%APP_VERSION% /DSourceDir="%RELEASE_DIR%\%APP_NAME%" /DOutputDir="%INSTALLER_DIR%" "%INSTALLER_SCRIPT%"
+  if errorlevel 1 (
+    echo Installer build failed.
+    exit /b 1
+  )
+)
+
+for /d /r "%~dp0" %%d in (__pycache__) do (
+  if exist "%%d" rmdir /s /q "%%d"
+)
+
+if exist "%BUILD_DIR%" (
+  rmdir /s /q "%BUILD_DIR%"
+)
+if exist "%BUILD_ROOT%" (
+  rmdir /s /q "%BUILD_ROOT%"
+)
+
+echo.
+echo Build completed.
+echo Double-click this file to start:
+echo %RELEASE_DIR%\%APP_NAME%\AutoCruiseCE.exe
+echo Portable package:
+echo %RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip
+if exist "%INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe" (
+  echo Installer:
+  echo %INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe
+)
+
+exit /b 0
