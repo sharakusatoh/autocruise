@@ -535,6 +535,50 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertNotIn("安全", constitution.excerpt)
         self.assertNotIn("approval", constitution.excerpt.lower())
 
+    def test_workspace_paths_systemprompt_resolution_prefers_updated_bundled_prompt(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        runtime = data_root / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        runtime.write_text("old runtime copy", encoding="utf-8")
+        time.sleep(0.02)
+        bundled.write_text("new bundled copy", encoding="utf-8")
+        self.assertEqual(paths.resolve_systemprompt_path("AutoCruise.md"), bundled)
+
+    def test_workspace_paths_systemprompt_options_merge_runtime_and_bundled(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        (self.temp_dir / "users" / "default" / "systemprompt" / "bundled-only.md").write_text(
+            "# bundled",
+            encoding="utf-8",
+        )
+        (data_root / "users" / "default" / "systemprompt" / "runtime-only.md").write_text(
+            "# runtime",
+            encoding="utf-8",
+        )
+        names = paths.iter_systemprompt_names()
+        self.assertIn("bundled-only.md", names)
+        self.assertIn("runtime-only.md", names)
+
+    def test_retrieval_uses_selected_bundled_systemprompt_when_runtime_copy_is_stale(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        runtime = data_root / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        runtime.write_text("stale runtime copy", encoding="utf-8")
+        time.sleep(0.02)
+        bundled.write_text("bundled source of truth", encoding="utf-8")
+        preferences = load_structured(paths.preferences_path())
+        preferences["selected_system_prompt"] = "AutoCruise.md"
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+        selection = next(item for item in context.selections if item.kind == "systemprompt")
+        self.assertEqual(Path(selection.path), bundled)
+        self.assertIn("bundled source of truth", selection.excerpt)
+
     def test_prompt_library_assets_and_friendly_task_names_exist(self) -> None:
         items = build_knowledge_items(WorkspacePaths(ROOT))
         task_names = {item["name"] for item in items["action_templates"]}
@@ -1285,7 +1329,8 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertTrue((data_root / "users" / "default" / "provider_settings.json").exists())
         self.assertTrue((data_root / "users" / "default" / "preferences.yaml").exists())
         self.assertTrue((data_root / "users" / "default" / "user_custom_prompt.md").exists())
-        self.assertTrue((data_root / "users" / "default" / "systemprompt" / "AcePilot.md").exists())
+        self.assertTrue((data_root / "users" / "default" / "systemprompt").exists())
+        self.assertEqual(paths.resolve_systemprompt_path("AcePilot.md"), systemprompt_source / "AcePilot.md")
 
     def test_workspace_paths_refresh_legacy_default_prompt(self) -> None:
         data_root = self.temp_dir / "runtime-data"
@@ -1363,8 +1408,8 @@ class AutoCruiseTests(unittest.TestCase):
         )
 
     def test_build_product_footer_uses_codex_edition_copy(self) -> None:
-        product_text, creator_text = build_product_footer("1.0.0", "Sharaku Satoh")
-        self.assertEqual(product_text, "AutoCruise Codex Edition Version 1.0.0")
+        product_text, creator_text = build_product_footer("1.0.1", "Sharaku Satoh")
+        self.assertEqual(product_text, "AutoCruise Codex Edition Version 1.0.1")
         self.assertEqual(creator_text, "Created by Sharaku Satoh")
 
     def test_compact_panel_copy_truncates_and_keeps_full_tooltip_text(self) -> None:

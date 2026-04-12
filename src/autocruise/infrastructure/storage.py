@@ -133,6 +133,8 @@ class WorkspacePaths:
         self.constitution_dir = root / "constitution"
         self.apps_dir = root / "apps"
         self.tasks_dir = root / "tasks"
+        self.bundled_users_dir = root / "users"
+        self.bundled_systemprompt_dir = self.bundled_users_dir / "default" / "systemprompt"
         self.users_dir = self.data_root / "users"
         self.systemprompt_dir = self.users_dir / "default" / "systemprompt"
         self.custom_prompt_dir = self.users_dir / "default" / "custom_prompts"
@@ -166,10 +168,9 @@ class WorkspacePaths:
         self._seed_user_file("provider_settings.json")
         self._seed_user_file("preferences.yaml")
         self._seed_user_file("user_custom_prompt.md")
-        self._seed_user_markdown_directory("systemprompt")
         self._seed_user_markdown_directory("custom_prompts")
         (self.users_dir / "default" / "scheduled_jobs.json").touch(exist_ok=True)
-        if not any(self.systemprompt_dir.glob("*.md")):
+        if not any(self.iter_systemprompt_names()):
             (self.systemprompt_dir / "default.md").write_text(
                 "# Default System Prompt\n\nFocus on practical progress and concise planning.\n",
                 encoding="utf-8",
@@ -198,9 +199,52 @@ class WorkspacePaths:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def iter_systemprompt_names(self) -> list[str]:
+        names: set[str] = set()
+        for directory in self.systemprompt_search_dirs():
+            if not directory.exists():
+                continue
+            names.update(path.name for path in directory.glob("*.md") if path.is_file())
+        return sorted(names)
+
+    def resolve_systemprompt_path(self, name: str) -> Path | None:
+        normalized = str(name or "").strip()
+        if not normalized:
+            return None
+        if not Path(normalized).suffix:
+            normalized = f"{normalized}.md"
+        runtime_path = self.systemprompt_dir / normalized
+        bundled_path = self.bundled_systemprompt_dir / normalized
+        runtime_exists = runtime_path.exists()
+        bundled_exists = bundled_path.exists()
+        if runtime_exists and bundled_exists:
+            runtime_text = read_text(runtime_path)
+            bundled_text = read_text(bundled_path)
+            if runtime_text == bundled_text:
+                return bundled_path
+            runtime_mtime = runtime_path.stat().st_mtime
+            bundled_mtime = bundled_path.stat().st_mtime
+            return runtime_path if runtime_mtime >= bundled_mtime else bundled_path
+        if runtime_exists:
+            return runtime_path
+        if bundled_exists:
+            return bundled_path
+        return None
+
+    def systemprompt_search_dirs(self) -> list[Path]:
+        directories: list[Path] = []
+        seen: set[Path] = set()
+        for directory in (self.systemprompt_dir, self.bundled_systemprompt_dir):
+            resolved = directory.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            directories.append(directory)
+        return directories
+
     def _seed_user_file(self, name: str) -> None:
         target = self.users_dir / "default" / name
-        source = self.root / "users" / "default" / name
+        source = self.bundled_users_dir / "default" / name
         if target.exists() and target.stat().st_size > 0:
             if not self._should_refresh_default_user_file(name, target, source):
                 return

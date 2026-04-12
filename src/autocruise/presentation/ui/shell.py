@@ -1857,16 +1857,13 @@ class MainWindow(QMainWindow):
         self._show_notice(tr("message.screenshots_purged", count=deleted), tone="success")
 
     def _system_prompt_options(self) -> list[str]:
-        return [path.name for path in sorted(self.paths.systemprompt_dir.glob("*.md")) if path.is_file()]
+        return self.paths.iter_systemprompt_names()
 
     def _selected_system_prompt_path(self) -> Path | None:
         selected = str(self.preferences.get("selected_system_prompt", "") or "").strip()
         if not selected:
             return None
-        path = self.paths.systemprompt_dir / selected
-        if not path.exists() and not path.suffix:
-            path = path.with_suffix(".md")
-        return path if path.exists() else None
+        return self.paths.resolve_systemprompt_path(selected)
 
     def _remember_system_prompt_selection(self, selected: str) -> None:
         normalized = str(selected or "").strip()
@@ -1888,7 +1885,15 @@ class MainWindow(QMainWindow):
         if path is None:
             self._new_system_prompt()
             return
-        self._open_text_dialog(path.stem, read_text(path), editable=True, save_path=path)
+        save_path = path
+        if path.parent != self.paths.systemprompt_dir:
+            save_path = self.paths.systemprompt_dir / path.name
+            if not save_path.exists():
+                save_path.write_text(read_text(path), encoding="utf-8")
+            self.preferences["selected_system_prompt"] = save_path.name
+            self._save_preferences()
+            self._refresh_settings()
+        self._open_text_dialog(save_path.stem, read_text(save_path), editable=True, save_path=save_path)
 
     def _open_system_prompt_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.systemprompt_dir)))

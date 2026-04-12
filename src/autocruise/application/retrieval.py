@@ -124,15 +124,11 @@ class RetrievalPlanner:
         preferences = load_structured(self.paths.users_dir / "default" / "preferences.yaml")
         selected_system_prompt = str((preferences or {}).get("selected_system_prompt", "")).strip()
         if selected_system_prompt:
-            selected_path = self.paths.systemprompt_dir / selected_system_prompt
-            if not selected_path.exists() and not selected_path.suffix:
-                candidate = selected_path.with_suffix(".md")
-                if candidate.exists():
-                    selected_path = candidate
+            selected_path = self.paths.resolve_systemprompt_path(selected_system_prompt)
             files.append(
                 (
                     "systemprompt",
-                    selected_path,
+                    selected_path or (self.paths.systemprompt_dir / selected_system_prompt),
                     4.8,
                     "Selected system prompt",
                 )
