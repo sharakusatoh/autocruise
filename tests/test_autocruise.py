@@ -59,7 +59,7 @@ from autocruise.infrastructure.browser.playwright_adapter import PlaywrightAdapt
 from autocruise.infrastructure.browser.sensor import BrowserSensorHub
 from autocruise.infrastructure import codex_app_server as codex_app_server_module
 from autocruise.infrastructure.windows import uia_client as uia_client_module
-from autocruise.infrastructure.providers import ProviderClient, ProviderError, ProviderRegistry
+from autocruise.infrastructure.providers import CodexProviderClient, ProviderClient, ProviderError, ProviderRegistry
 from autocruise.infrastructure.storage import (
     ProviderSettingsRepository,
     ScheduledJobRepository,
@@ -561,6 +561,18 @@ class AutoCruiseTests(unittest.TestCase):
         names = paths.iter_systemprompt_names()
         self.assertIn("bundled-only.md", names)
         self.assertIn("runtime-only.md", names)
+
+    def test_workspace_paths_resolve_systemprompt_tolerates_non_utf8_runtime_copy(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        runtime = data_root / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        runtime.write_bytes("日本語の実行指示".encode("cp932"))
+        time.sleep(0.02)
+        bundled.write_text("bundled utf-8 copy", encoding="utf-8")
+        resolved = paths.resolve_systemprompt_path("AutoCruise.md")
+        self.assertEqual(resolved, bundled)
 
     def test_retrieval_uses_selected_bundled_systemprompt_when_runtime_copy_is_stale(self) -> None:
         data_root = self.temp_dir / "runtime-data"
@@ -1213,6 +1225,52 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertTrue(client.image_path.endswith(".png"))
         self.assertFalse(Path(client.image_path).exists())
         self.assertEqual(client.session_key, "")
+
+    def test_codex_provider_test_connection_uses_live_account_state(self) -> None:
+        class FakeAppServer:
+            def read_account(self, refresh_token: bool = False):
+                _ = refresh_token
+                return codex_app_server_module.CodexAccountState(
+                    auth_mode="chatgpt",
+                    requires_openai_auth=True,
+                    email="tester@example.com",
+                    plan_type="plus",
+                )
+
+        class TestCodexClient(CodexProviderClient):
+            def __init__(self, workspace_root: Path, app_server) -> None:
+                super().__init__(workspace_root, app_server=app_server)
+                self.image_path = ""
+
+            def generate_text(self, settings, api_key, instructions, prompt, image_path=None, session_key=None, output_schema=None):
+                _ = settings, api_key, instructions, prompt, session_key, output_schema
+                self.image_path = image_path or ""
+                return "OK"
+
+        settings = ProviderSettingsRepository(self.paths).get_default()
+        client = TestCodexClient(self.temp_dir, FakeAppServer())
+        result = client.test_connection(settings, "")
+        self.assertTrue(result.ok)
+        self.assertTrue(client.image_path.endswith(".png"))
+
+    def test_codex_provider_test_connection_reports_missing_chatgpt_login(self) -> None:
+        class FakeAppServer:
+            def read_account(self, refresh_token: bool = False):
+                _ = refresh_token
+                return codex_app_server_module.CodexAccountState(
+                    auth_mode=None,
+                    requires_openai_auth=True,
+                )
+
+        class TestCodexClient(CodexProviderClient):
+            def generate_text(self, settings, api_key, instructions, prompt, image_path=None, session_key=None, output_schema=None):
+                raise AssertionError("generate_text should not run when auth is missing")
+
+        settings = ProviderSettingsRepository(self.paths).get_default()
+        client = TestCodexClient(self.temp_dir, FakeAppServer())
+        result = client.test_connection(settings, "")
+        self.assertFalse(result.ok)
+        self.assertIn("ChatGPT", result.message)
 
     def test_provider_registry_rejects_custom_provider(self) -> None:
         registry = ProviderRegistry(self.temp_dir)

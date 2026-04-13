@@ -32,6 +32,7 @@ CRYPTPROTECT_UI_FORBIDDEN = 0x01
 LEGACY_MAX_STEPS_DEFAULT = 60
 MAX_STEPS_LIMIT_MIN = 5
 MAX_STEPS_LIMIT_MAX = 5000
+TEXT_READ_ENCODINGS = ("utf-8", "utf-8-sig", "cp932", "utf-16")
 
 
 def make_json_safe(value: Any) -> Any:
@@ -51,7 +52,17 @@ def make_json_safe(value: Any) -> Any:
 def read_text(path: Path) -> str:
     if not path.exists():
         return ""
-    return path.read_text(encoding="utf-8")
+    for encoding in TEXT_READ_ENCODINGS:
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def load_structured(path: Path) -> dict[str, Any]:

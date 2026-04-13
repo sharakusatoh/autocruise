@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from autocruise.domain.models import ProviderSettings, ProviderTestResult
-from autocruise.infrastructure.codex_app_server import CodexAppServerConnection, CodexAppServerError, read_cached_auth_mode
+from autocruise.infrastructure.codex_app_server import CodexAppServerConnection, CodexAppServerError
 
 
 REDACTION_PATTERNS = (
@@ -66,7 +66,15 @@ class CodexProviderClient(ProviderClient):
 
     def test_connection(self, settings: ProviderSettings, api_key: str) -> ProviderTestResult:
         _ = api_key
-        if read_cached_auth_mode() != "chatgpt":
+        try:
+            account = self.app_server.read_account(refresh_token=False)
+        except CodexAppServerError as exc:
+            return ProviderTestResult(
+                ok=False,
+                message=scrub_sensitive_text(str(exc))
+                or "Codex App Server is unavailable. Install or update Codex CLI, then sign in with ChatGPT.",
+            )
+        if account.auth_mode != "chatgpt":
             return ProviderTestResult(
                 ok=False,
                 message="Codex is not signed in with ChatGPT. Open Settings and choose Sign in with ChatGPT.",
