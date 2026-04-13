@@ -2548,6 +2548,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIn("version=version_info", spec_path.read_text(encoding="utf-8"))
         self.assertIn("optimize=1", spec_path.read_text(encoding="utf-8"))
         self.assertIn("docs", spec_path.read_text(encoding="utf-8"))
+        self.assertIn("users/default/systemprompt", spec_path.read_text(encoding="utf-8"))
         self.assertIn("APP_NAME", spec_path.read_text(encoding="utf-8"))
         self.assertNotIn('"models"', spec_path.read_text(encoding="utf-8"))
         self.assertNotIn('"runtime"', spec_path.read_text(encoding="utf-8"))
