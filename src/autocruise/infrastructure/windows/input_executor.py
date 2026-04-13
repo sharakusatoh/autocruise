@@ -213,13 +213,22 @@ class InputExecutor:
         user32.mouse_event(up_flag, 0, 0, 0, 0)
 
     def _focus_target_window(self, action: Action) -> None:
-        title = (action.target.window_title or action.target.name or "").strip()
-        if not title:
-            return
-        window = self.window_manager.find_window(title)
-        if window is not None:
-            self.window_manager.focus_window(window.window_id)
-            time.sleep(0.05)
+        candidates: list[str] = []
+        for value in (action.target.window_title, action.target.name):
+            text = str(value or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+        marker = str(action.target.fallback_visual_hint or "").strip().lower()
+        if marker.startswith("launch:"):
+            app_key = marker.split(":", 1)[1].strip()
+            if app_key and app_key not in candidates:
+                candidates.append(app_key)
+        for title in candidates:
+            window = self.window_manager.find_window(title)
+            if window is not None:
+                self.window_manager.focus_window(window.window_id)
+                time.sleep(0.05)
+                return
 
     def _send_text(self, text: str) -> tuple[bool, str]:
         if not text:

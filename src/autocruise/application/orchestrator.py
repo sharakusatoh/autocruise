@@ -59,7 +59,7 @@ class AgentToolset(Protocol):
     def plan_next_action(self, goal: str, observation, recent_actions: list[Action], context=None) -> PlanStep: ...
     def verify_target(self, action: Action, observation): ...
     def execute_action(self, action: Action): ...
-    def wait_for_expected_change(self, session_id: str, action: Action, previous_observation, *, recent_actions: list[str] | None = None): ...
+    def wait_for_expected_change(self, session_id: str, action: Action, previous_observation, *, recent_actions: list[str] | None = None, execution_result=None): ...
     def validate_outcome(self, expected_outcome: str, observation, previous_observation=None, action: Action | None = None): ...
     def update_memory(self, entry: LearningEntry) -> None: ...
     def abort_session(self, reason: str) -> None: ...
@@ -134,6 +134,8 @@ class SessionOrchestrator:
             step_count = 0
             confirmation_notes: list[str] = []
             learning_updates = 0
+            allow_postcheck_observation_reuse = bool(getattr(toolset, "reuse_postcheck_observation", True))
+            reuse_postcheck_observation = False
 
             while True:
                 if self._stop_requested:
@@ -144,21 +146,25 @@ class SessionOrchestrator:
                         learning_updates,
                     )
 
-                snapshot = self._maybe_pause(snapshot, SessionState.OBSERVING)
-                snapshot = self._transition(
-                    snapshot,
-                    SessionState.OBSERVING,
-                    ObservingData(reason="Refresh structured state before planning"),
-                    "Observe current state",
-                )
-                observation = toolset.capture_observation(
-                    session_id,
-                    previous_observation=snapshot.current_observation,
-                    recent_actions=self._recent_action_labels(recent_actions),
-                    force_full=snapshot.current_observation is None,
-                )
-                snapshot.current_observation = observation
-                self._emit("observation", {"observation": observation})
+                if allow_postcheck_observation_reuse and reuse_postcheck_observation and snapshot.current_observation is not None:
+                    observation = snapshot.current_observation
+                    reuse_postcheck_observation = False
+                else:
+                    snapshot = self._maybe_pause(snapshot, SessionState.OBSERVING)
+                    snapshot = self._transition(
+                        snapshot,
+                        SessionState.OBSERVING,
+                        ObservingData(reason="Refresh structured state before planning"),
+                        "Observe current state",
+                    )
+                    observation = toolset.capture_observation(
+                        session_id,
+                        previous_observation=snapshot.current_observation,
+                        recent_actions=self._recent_action_labels(recent_actions),
+                        force_full=snapshot.current_observation is None,
+                    )
+                    snapshot.current_observation = observation
+                    self._emit("observation", {"observation": observation})
 
                 snapshot = self._transition(
                     snapshot,
@@ -226,6 +232,7 @@ class SessionOrchestrator:
                             ReplanningData(failure_reason=verification.reason, attempt=replans),
                             "Precheck failed; replanning",
                         )
+                        reuse_postcheck_observation = False
                         context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=verification.reason)
                         snapshot.retrieved_context = context
                         self._log_retrieval(session_id, context)
@@ -263,6 +270,7 @@ class SessionOrchestrator:
                         ReplanningData(failure_reason=failure_reason, attempt=replans),
                         "Execution failed; replanning",
                     )
+                    reuse_postcheck_observation = False
                     context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=failure_reason)
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
@@ -279,6 +287,7 @@ class SessionOrchestrator:
                     action,
                     precheck_observation,
                     recent_actions=self._recent_action_labels(recent_actions),
+                    execution_result=execution,
                 )
                 snapshot.current_observation = postcheck_observation
                 validation = toolset.validate_outcome(
@@ -315,6 +324,7 @@ class SessionOrchestrator:
                         ReplanningData(failure_reason=validation.details, attempt=replans),
                         "Validation failed; replanning",
                     )
+                    reuse_postcheck_observation = False
                     context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=validation.details)
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
@@ -326,6 +336,7 @@ class SessionOrchestrator:
                 replans = 0
                 last_failure_reason = ""
                 failure_counts.clear()
+                reuse_postcheck_observation = allow_postcheck_observation_reuse
 
                 app_name = (
                     snapshot.retrieved_context.app_candidates[0]

@@ -34,6 +34,7 @@ class MockAgentToolset:
         self.memory_path = memory_path
         self.live_planner = live_planner
         self.stage = 0
+        self.reuse_postcheck_observation = False
         self.active_window = WindowInfo(
             window_id=101,
             title="Demo Workspace",
@@ -190,6 +191,10 @@ class MockAgentToolset:
         )
 
     def verify_target(self, action: Action, observation: Observation) -> VerificationResult:
+        if action.type == ActionType.SHELL_EXECUTE:
+            if action.shell_command.strip():
+                return VerificationResult(True, 0.95, "Mock shell action is ready")
+            return VerificationResult(False, 0.0, "Shell command is empty")
         if action.type == ActionType.FOCUS_WINDOW:
             for window in observation.visible_windows:
                 if window.title == action.target.window_title:
@@ -212,6 +217,7 @@ class MockAgentToolset:
         previous_observation: Observation,
         *,
         recent_actions: list[str] | None = None,
+        execution_result: ExecutionResult | None = None,
     ) -> Observation:
         observation = self.capture_observation(
             session_id,
@@ -224,6 +230,13 @@ class MockAgentToolset:
             "matched_signal": action.expected_signals[0].kind.value if action.expected_signals else "",
             "wait_satisfied_by": "mock",
         }
+        if execution_result is not None:
+            observation.raw_ref["last_execution"] = {
+                "success": bool(execution_result.success),
+                "details": execution_result.details,
+                "error": execution_result.error,
+                "payload": dict(execution_result.payload or {}),
+            }
         return observation
 
     def validate_outcome(

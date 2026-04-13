@@ -31,6 +31,7 @@ from autocruise.infrastructure.storage import append_jsonl
 from autocruise.infrastructure.windows.input_executor import InputExecutor
 from autocruise.infrastructure.windows.observation_builder import WindowsObservationBuilder
 from autocruise.infrastructure.windows.primary_sensor import PrimarySensorHub, observation_sensor_snapshot
+from autocruise.infrastructure.windows.shell_executor import ShellExecutor
 from autocruise.infrastructure.windows.uia_adapter import UIAAdapter
 from autocruise.infrastructure.windows.window_manager import WindowManager
 
@@ -61,19 +62,19 @@ PRIMARY_ACTION_LABELS = {
 EDIT_CONTROL_HINTS = {"edit", "document", "text", "combo", "pane"}
 RUN_DIALOG_HINTS = {"run", "ファイル名を指定して実行"}
 APP_LAUNCH_SPECS = {
-    "paint": {"display": "Paint", "command": "mspaint", "terms": ("paint", "ペイント", "mspaint")},
-    "gimp": {"display": "GIMP", "command": "gimp", "terms": ("gimp",)},
-    "notepad": {"display": "Notepad", "command": "notepad", "terms": ("notepad", "メモ帳")},
-    "calculator": {"display": "Calculator", "command": "calc", "terms": ("calculator", "電卓", "calc")},
-    "excel": {"display": "Excel", "command": "excel", "terms": ("excel", "エクセル")},
-    "word": {"display": "Word", "command": "winword", "terms": ("word", "ワード")},
-    "powerpoint": {"display": "PowerPoint", "command": "powerpnt", "terms": ("powerpoint", "パワポ", "power point")},
-    "outlook": {"display": "Outlook", "command": "outlook", "terms": ("outlook",)},
-    "edge": {"display": "Edge", "command": "msedge", "terms": ("edge", "microsoft edge")},
-    "chrome": {"display": "Chrome", "command": "chrome", "terms": ("chrome",)},
-    "terminal": {"display": "Windows Terminal", "command": "wt", "terms": ("terminal", "windows terminal", "powershell", "cmd")},
-    "vscode": {"display": "Visual Studio Code", "command": "code", "terms": ("vscode", "visual studio code", "vs code")},
-    "file_explorer": {"display": "File Explorer", "command": "explorer", "terms": ("file explorer", "explorer", "エクスプローラー")},
+    "paint": {"display": "Paint", "command": "mspaint", "terms": ("paint", "ペイント", "mspaint"), "launch_strategy": "process"},
+    "gimp": {"display": "GIMP", "command": "gimp", "terms": ("gimp",), "launch_strategy": "process"},
+    "notepad": {"display": "Notepad", "command": "notepad", "terms": ("notepad", "メモ帳"), "launch_strategy": "process"},
+    "calculator": {"display": "Calculator", "command": "calc", "terms": ("calculator", "電卓", "calc"), "launch_strategy": "process"},
+    "excel": {"display": "Excel", "command": "excel", "terms": ("excel", "エクセル"), "launch_strategy": "process"},
+    "word": {"display": "Word", "command": "winword", "terms": ("word", "ワード"), "launch_strategy": "process"},
+    "powerpoint": {"display": "PowerPoint", "command": "powerpnt", "terms": ("powerpoint", "パワポ", "power point"), "launch_strategy": "process"},
+    "outlook": {"display": "Outlook", "command": "outlook", "terms": ("outlook",), "launch_strategy": "process"},
+    "edge": {"display": "Edge", "command": "msedge", "terms": ("edge", "microsoft edge"), "launch_strategy": "process"},
+    "chrome": {"display": "Chrome", "command": "chrome", "terms": ("chrome",), "launch_strategy": "process"},
+    "terminal": {"display": "Windows Terminal", "command": "wt", "terms": ("terminal", "windows terminal", "powershell", "cmd"), "launch_strategy": "process"},
+    "vscode": {"display": "Visual Studio Code", "command": "code", "terms": ("vscode", "visual studio code", "vs code"), "launch_strategy": "process"},
+    "file_explorer": {"display": "File Explorer", "command": "explorer", "terms": ("file explorer", "explorer", "エクスプローラー"), "launch_strategy": "process"},
 }
 
 
@@ -90,6 +91,7 @@ class WindowsAgentToolset:
         automation_router: AutomationRouter | None = None,
         browser_sensor: BrowserSensorHub | None = None,
         primary_sensor: PrimarySensorHub | None = None,
+        shell_executor: ShellExecutor | None = None,
     ) -> None:
         self.root = root
         self.memory_path = memory_path
@@ -105,6 +107,7 @@ class WindowsAgentToolset:
             uia_adapter,
             self.browser_sensor,
         )
+        self.shell_executor = shell_executor or ShellExecutor(root)
 
     def list_windows(self):
         return self.window_manager.list_windows()
@@ -163,8 +166,16 @@ class WindowsAgentToolset:
         previous_observation: Observation,
         *,
         recent_actions: list[str] | None = None,
+        execution_result: ExecutionResult | None = None,
     ) -> Observation:
         recent_actions = recent_actions or []
+        if action.type == ActionType.SHELL_EXECUTE:
+            return self._wait_for_shell_completion(
+                action,
+                previous_observation,
+                recent_actions=recent_actions,
+                execution_result=execution_result,
+            )
         previous_snapshot = observation_sensor_snapshot(previous_observation) or self.primary_sensor.snapshot()
         expected_signals = action.expected_signals or self._default_expected_signals(action)
         wait_started = time.monotonic()
@@ -206,6 +217,13 @@ class WindowsAgentToolset:
         observation.raw_ref["wait_satisfied_by"] = observation.raw_ref["wait"]["wait_satisfied_by"]
         observation.raw_ref["browser_refresh_ms"] = 0
         observation.raw_ref["uia_host_ms"] = observation.raw_ref.get("sensor_poll_ms", 0)
+        if execution_result is not None:
+            observation.raw_ref["last_execution"] = {
+                "success": bool(execution_result.success),
+                "details": execution_result.details,
+                "error": execution_result.error,
+                "payload": dict(execution_result.payload or {}),
+            }
         if observation.screenshot_path:
             observation.raw_ref["image_turn_count"] = 1
             observation.raw_ref["screenshot_count"] = 1
@@ -222,7 +240,7 @@ class WindowsAgentToolset:
         context=None,
     ) -> PlanStep:
         retrieved_context, planning_meta = self._normalize_context(context)
-        launch_step = self._plan_direct_app_launch(goal, observation, recent_actions, retrieved_context)
+        launch_step = self._plan_direct_app_launch(goal, observation, recent_actions, retrieved_context, planning_meta)
         if launch_step is not None:
             return self._with_wait_defaults(launch_step)
         skip_live_replan = bool((observation.raw_ref or {}).get("planner_skip_reason"))
@@ -352,6 +370,8 @@ class WindowsAgentToolset:
     def verify_target(self, action: Action, observation: Observation) -> VerificationResult:
         if action.type == ActionType.DRAG:
             self._refine_drag_target(action, observation)
+        if action.type == ActionType.SHELL_EXECUTE:
+            return self._verify_shell_action(action)
         if action.type == ActionType.FOCUS_WINDOW:
             for window in observation.visible_windows:
                 if action.target.window_title and action.target.window_title == window.title:
@@ -392,6 +412,8 @@ class WindowsAgentToolset:
         return VerificationResult(False, 0.2, "Target element is not visible")
 
     def execute_action(self, action: Action) -> ExecutionResult:
+        if action.type == ActionType.SHELL_EXECUTE:
+            return self.shell_executor.execute(action)
         structured_result = self._execute_with_structured_automation(action)
         if structured_result is not None:
             return structured_result
@@ -444,6 +466,13 @@ class WindowsAgentToolset:
         marker_result = self._validate_marker_outcome(action, observation)
         if marker_result is not None:
             return marker_result
+        shell_result = self._shell_result_from_observation(observation)
+        if action is not None and action.type == ActionType.SHELL_EXECUTE and shell_result:
+            if bool(shell_result.get("success", False)):
+                details = expected_outcome or str(shell_result.get("details", "")).strip() or "Shell command completed."
+                return ValidationResult(True, 0.82, details)
+            details = str(shell_result.get("error") or shell_result.get("details") or "Shell command failed").strip()
+            return ValidationResult(False, 0.2, details)
         if action is not None and action.type == ActionType.TYPE_TEXT:
             text_result = self._validate_text_entry(action, observation, previous_observation)
             if text_result is not None:
@@ -515,6 +544,10 @@ class WindowsAgentToolset:
 
     def _default_expected_signals(self, action: Action) -> list[ExpectedSignal]:
         target_label = action.target.name or action.target.automation_id or action.target.window_title
+        if action.type == ActionType.SHELL_EXECUTE:
+            if str(action.shell_kind or "").strip().lower() == "process":
+                return [ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=self._shell_target_label(action))]
+            return []
         if action.type == ActionType.CLICK:
             return [
                 ExpectedSignal(ExpectedSignalKind.ELEMENT_ENABLED_CHANGED, target=target_label),
@@ -552,6 +585,13 @@ class WindowsAgentToolset:
         return [ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=target_label)]
 
     def _default_wait_timeout_ms(self, action: Action) -> int:
+        marker = (action.target.fallback_visual_hint or "").strip().lower()
+        if marker.startswith("launch:"):
+            return 5000
+        if action.type == ActionType.SHELL_EXECUTE:
+            if str(action.shell_kind or "").strip().lower() == "process":
+                return 5000
+            return 200
         if action.type == ActionType.DRAG:
             return 900
         if action.type == ActionType.HOTKEY:
@@ -578,6 +618,88 @@ class WindowsAgentToolset:
         hint = self._normalize_text(" ".join([action.target.window_title, action.target.name, action.target.fallback_visual_hint]))
         return any(token in hint for token in ("chrome", "edge", "browser", "tab", "web"))
 
+    def _verify_shell_action(self, action: Action) -> VerificationResult:
+        command = str(action.shell_command or "").strip()
+        if not command:
+            return VerificationResult(False, 0.0, "Shell command is empty")
+        kind = str(action.shell_kind or "powershell").strip().lower() or "powershell"
+        if kind not in {"powershell", "cmd", "process"}:
+            return VerificationResult(False, 0.0, f"Unsupported shell kind: {kind}")
+        cwd = str(action.shell_cwd or "").strip()
+        if cwd:
+            candidate = Path(cwd)
+            if not candidate.is_absolute():
+                candidate = self.root / candidate
+            if not candidate.exists() or not candidate.is_dir():
+                return VerificationResult(False, 0.0, "Shell working directory does not exist")
+        return VerificationResult(True, 0.95, f"Shell action is ready via {kind}")
+
+    def _wait_for_shell_completion(
+        self,
+        action: Action,
+        previous_observation: Observation,
+        *,
+        recent_actions: list[str],
+        execution_result: ExecutionResult | None,
+    ) -> Observation:
+        expected_signals = action.expected_signals or self._default_expected_signals(action)
+        if expected_signals:
+            previous_snapshot = observation_sensor_snapshot(previous_observation) or self.primary_sensor.snapshot()
+            wait_started = time.monotonic()
+            wait_result = self.primary_sensor.wait_for_expected_signals(
+                previous_snapshot,
+                expected_signals,
+                timeout_ms=max(int(action.wait_timeout_ms or 0), 200),
+            )
+            observation = self.observation_builder.refresh_structured(
+                recent_actions,
+                previous_observation=previous_observation,
+                sensor_snapshot=wait_result["snapshot"],
+            )
+            elapsed_ms = int((time.monotonic() - wait_started) * 1000)
+        else:
+            snapshot = self.primary_sensor.snapshot()
+            observation = self.observation_builder.refresh_structured(
+                recent_actions,
+                previous_observation=previous_observation,
+                sensor_snapshot=snapshot,
+            )
+            wait_result = {
+                "matched": False,
+                "snapshot": snapshot,
+                "matched_signal": "",
+                "wait_satisfied_by": "command",
+            }
+            elapsed_ms = 0
+        observation.raw_ref["wait"] = {
+            "matched": bool(wait_result["matched"]),
+            "matched_signal": str(wait_result.get("matched_signal", "")),
+            "wait_satisfied_by": str(wait_result.get("wait_satisfied_by", "")),
+            "timeout_ms": int(action.wait_timeout_ms or 0),
+            "elapsed_ms": elapsed_ms,
+        }
+        observation.raw_ref["wait_satisfied_by"] = observation.raw_ref["wait"]["wait_satisfied_by"]
+        observation.raw_ref["browser_refresh_ms"] = 0
+        observation.raw_ref["uia_host_ms"] = observation.raw_ref.get("sensor_poll_ms", 0)
+        observation.raw_ref["image_turn_count"] = 0
+        observation.raw_ref["screenshot_count"] = 0
+        if execution_result is not None:
+            observation.raw_ref["last_execution"] = {
+                "success": bool(execution_result.success),
+                "details": execution_result.details,
+                "error": execution_result.error,
+                "payload": dict(execution_result.payload or {}),
+            }
+        return observation
+
+    def _shell_result_from_observation(self, observation: Observation) -> dict[str, Any]:
+        raw_ref = observation.raw_ref if isinstance(observation.raw_ref, dict) else {}
+        payload = raw_ref.get("last_execution", {})
+        return payload if isinstance(payload, dict) else {}
+
+    def _shell_target_label(self, action: Action) -> str:
+        return action.target.window_title or action.target.name or action.shell_command or "shell_execute"
+
     def _normalize_context(self, context: Any) -> tuple[Any, dict[str, Any]]:
         if isinstance(context, dict):
             return context.get("retrieved_context"), context
@@ -594,9 +716,9 @@ class WindowsAgentToolset:
         normalized_goal = goal.lower()
         for hint in hints:
             search = str(hint).replace("_", " ").lower()
-            if search in normalized_goal or any(search in window.title.lower() for window in windows):
+            if search in normalized_goal or any(search in window.title.lower() or search in window.class_name.lower() for window in windows):
                 for window in windows:
-                    if search in window.title.lower():
+                    if search in window.title.lower() or search in window.class_name.lower():
                         return window
         return windows[0]
 
@@ -701,10 +823,14 @@ class WindowsAgentToolset:
     def _recent_text_sent(self, recent_actions: list[Action], text: str) -> bool:
         return any(action.type == ActionType.TYPE_TEXT and action.text == text for action in recent_actions[-3:])
 
-    def _plan_direct_app_launch(self, goal: str, observation: Observation, recent_actions: list[Action], retrieved_context) -> PlanStep | None:
+    def _plan_direct_app_launch(self, goal: str, observation: Observation, recent_actions: list[Action], retrieved_context, planning_meta: dict[str, Any]) -> PlanStep | None:
         app_key = self._requested_launch_app(goal, retrieved_context)
         if not app_key or self._observation_has_app(observation, app_key):
             return None
+
+        strategy = str(APP_LAUNCH_SPECS[app_key].get("launch_strategy", "run_dialog") or "run_dialog").strip().lower()
+        if strategy == "process" and not self._should_fallback_launch_to_run_dialog(app_key, observation, planning_meta):
+            return self._plan_process_launch(app_key)
 
         app_element = self._find_element_by_terms(observation.detected_elements, APP_LAUNCH_SPECS[app_key]["terms"])
         if app_element is not None and not self._recently_repeated(recent_actions, ActionType.CLICK, app_element.name):
@@ -736,6 +862,56 @@ class WindowsAgentToolset:
                 hotkey="WIN+R",
             ),
             reasoning="Known apps launch more reliably from the Run dialog.",
+        )
+
+    def _should_fallback_launch_to_run_dialog(
+        self,
+        app_key: str,
+        observation: Observation,
+        planning_meta: dict[str, Any],
+    ) -> bool:
+        spec = APP_LAUNCH_SPECS.get(app_key, {})
+        command = self._normalize_text(spec.get("command", ""))
+        if not command:
+            return False
+        shell_result = self._shell_result_from_observation(observation)
+        payload = shell_result.get("payload", {}) if isinstance(shell_result, dict) else {}
+        executed_kind = self._normalize_text(payload.get("kind", ""))
+        executed_command = self._normalize_text(payload.get("command", ""))
+        if executed_kind != "process" or executed_command != command:
+            return False
+        if not bool(shell_result.get("success", False)):
+            return True
+        recent_failure_reason = self._normalize_text(planning_meta.get("recent_failure_reason", ""))
+        if not recent_failure_reason:
+            return False
+        if any(token in recent_failure_reason for token in ("notvisibleyet", "targetverificationfailure", "validationfailed")):
+            return True
+        return command in recent_failure_reason or self._normalize_text(app_key) in recent_failure_reason
+
+    def _plan_process_launch(self, app_key: str) -> PlanStep:
+        spec = APP_LAUNCH_SPECS[app_key]
+        display = spec["display"]
+        command = spec["command"]
+        return PlanStep(
+            summary=f"{display} を直接起動します。",
+            action=Action(
+                type=ActionType.SHELL_EXECUTE,
+                target=TargetRef(
+                    window_title=display,
+                    name=display,
+                    fallback_visual_hint=f"launch:{app_key}",
+                ),
+                purpose=f"{display} を最短経路で起動する",
+                reason=f"{display} は実行ダイアログを経由せず直接起動した方が安定します。",
+                preconditions=["デスクトップで外部プロセスを起動できること"],
+                expected_outcome=f"{display} のウィンドウが表示されます。",
+                confidence=0.98,
+                shell_kind="process",
+                shell_command=command,
+                shell_detach=True,
+            ),
+            reasoning="A direct process launch is faster and avoids Run dialog focus problems.",
         )
 
     def _plan_run_dialog_launch(self, app_key: str, observation: Observation, recent_actions: list[Action]) -> PlanStep:
@@ -1081,6 +1257,16 @@ class WindowsAgentToolset:
         ):
             return ValidationResult(True, 0.67, action.expected_outcome or "Editable field changed after typing.")
 
+        last_execution = self._shell_result_from_observation(observation) if action.type == ActionType.SHELL_EXECUTE else (
+            observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
+        )
+        if (
+            isinstance(last_execution, dict)
+            and bool(last_execution.get("success", False))
+            and (self._is_edit_focus(observation.focused_element) or self._is_edit_element(action.target.control_type))
+        ):
+            return ValidationResult(True, 0.58, action.expected_outcome or "Text input was sent to the focused editor.")
+
         return ValidationResult(False, 0.28, f"Typed text could not be verified on screen: {typed_text}")
 
     def _validate_marker_outcome(self, action: Action | None, observation: Observation) -> ValidationResult | None:
@@ -1112,10 +1298,13 @@ class WindowsAgentToolset:
     def _observation_evidence(self, observation: Observation) -> list[str]:
         evidence = [
             self._active_window_title(observation),
+            observation.active_window.class_name if observation.active_window else "",
             observation.focused_element,
             observation.ui_tree_summary,
             *observation.textual_hints[:12],
         ]
+        for window in observation.visible_windows[:12]:
+            evidence.extend([window.title, window.class_name])
         for element in observation.detected_elements[:16]:
             evidence.extend([element.name, element.automation_id, element.control_type])
         return [item for item in evidence if item]

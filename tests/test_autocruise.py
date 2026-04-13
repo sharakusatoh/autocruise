@@ -34,6 +34,7 @@ from autocruise.domain.models import (
     DetectedElement,
     ExpectedSignal,
     ExpectedSignalKind,
+    ExecutionResult,
     ExecutingData,
     LoadingContextData,
     Observation,
@@ -74,6 +75,7 @@ from autocruise.infrastructure.windows.input_executor import INPUT, KEYBDINPUT, 
 from autocruise.infrastructure.windows.observation_builder import WindowsObservationBuilder
 from autocruise.infrastructure.windows.primary_sensor import match_expected_signals
 from autocruise.infrastructure.windows.screenshot_provider import ScreenshotProvider, gdi32, user32 as screenshot_user32
+from autocruise.infrastructure.windows.shell_executor import ShellExecutor
 from autocruise.infrastructure.windows.uia_adapter import UIAAdapter
 from autocruise.infrastructure.windows.uia_client import UiaClientLayer
 from autocruise.infrastructure.windows.visual_guidance import annotate_image, build_visual_guide_state
@@ -322,6 +324,16 @@ class DummyInputExecutor:
 class RaisingInputExecutor:
     def execute(self, action):
         raise RuntimeError("boom")
+
+
+class DummyShellExecutor:
+    def __init__(self, result: ExecutionResult | None = None) -> None:
+        self.result = result or ExecutionResult(success=True, details="shell ok")
+        self.actions: list[Action] = []
+
+    def execute(self, action: Action) -> ExecutionResult:
+        self.actions.append(action)
+        return self.result
 
 
 class DummyUIAAdapter:
@@ -948,6 +960,89 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(plan.action.pointer_script[0].coordinate_mode, "relative")
         self.assertEqual(plan.action.pointer_script[0].path[1], PointerPoint(180, 180))
 
+    def test_live_planner_parses_shell_execute_action(self) -> None:
+        settings = type(
+            "Settings",
+            (),
+            {
+                "provider": "codex",
+                "base_url": "codex app-server",
+                "model": "gpt-5.4",
+                "timeout_seconds": 30,
+                "retry_count": 0,
+                "max_tokens": 500,
+                "allow_images": True,
+                "is_default": True,
+            },
+        )()
+        planner = LiveActionPlanner(
+            provider_repo=FakeProviderRepo(settings),
+            secret_store=FakeSecretStore(""),
+            provider_registry=FakeProviderRegistry(
+                json.dumps(
+                    {
+                        "summary": "Run the repository status command.",
+                        "reasoning": "Shell is faster than opening a terminal window manually.",
+                        "plan_outline": ["Inspect repository", "Decide next step"],
+                        "is_complete": False,
+                        "completion_reason": "",
+                        "action": {
+                            "type": "shell_execute",
+                            "target": {
+                                "window_title": "",
+                                "automation_id": "",
+                                "name": "",
+                                "control_type": "",
+                                "fallback_visual_hint": "",
+                            },
+                            "purpose": "Inspect repository state.",
+                            "reason": "A direct shell command is the fastest reliable path.",
+                            "preconditions": [],
+                            "expected_outcome": "The repository status is available for the next decision.",
+                            "risk_level": "low",
+                            "confidence": 0.9,
+                            "text": "",
+                            "hotkey": "",
+                            "scroll_amount": 0,
+                            "drag_coordinate_mode": "absolute",
+                            "drag_path": [],
+                            "drag_duration_ms": 0,
+                            "pointer_script": [],
+                            "shell_kind": "powershell",
+                            "shell_command": "git status --short",
+                            "shell_cwd": ".",
+                            "shell_timeout_seconds": 15,
+                            "shell_detach": False,
+                            "wait_timeout_ms": 0,
+                            "expected_signals": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        )
+        observation = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=1, title="AutoCruise CE"),
+            visible_windows=[WindowInfo(window_id=1, title="AutoCruise CE")],
+            detected_elements=[],
+            ui_tree_summary="Desktop ready",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=[],
+            recent_actions=[],
+        )
+
+        plan = planner.plan("Check the repository status", observation, [], {"session_id": "shell-demo"})
+
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.shell_kind, "powershell")
+        self.assertEqual(plan.action.shell_command, "git status --short")
+        self.assertEqual(plan.action.shell_cwd, ".")
+        self.assertEqual(plan.action.shell_timeout_seconds, 15)
+        self.assertEqual(plan.action.wait_timeout_ms, 200)
+        self.assertEqual(plan.action.expected_signals, [])
+
     def test_live_planner_passes_session_key_for_codex(self) -> None:
         settings = type(
             "Settings",
@@ -1466,8 +1561,8 @@ class AutoCruiseTests(unittest.TestCase):
         )
 
     def test_build_product_footer_uses_codex_edition_copy(self) -> None:
-        product_text, creator_text = build_product_footer("1.0.1", "Sharaku Satoh")
-        self.assertEqual(product_text, "AutoCruise Codex Edition Version 1.0.1")
+        product_text, creator_text = build_product_footer("1.0.2", "Sharaku Satoh")
+        self.assertEqual(product_text, "AutoCruise Codex Edition Version 1.0.2")
         self.assertEqual(creator_text, "Created by Sharaku Satoh")
 
     def test_compact_panel_copy_truncates_and_keeps_full_tooltip_text(self) -> None:
@@ -2267,7 +2362,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertTrue(verification.matched)
         self.assertIn("Hotkey", verification.reason)
 
-    def test_windows_toolset_prefers_run_dialog_for_paint_launch(self) -> None:
+    def test_windows_toolset_prefers_direct_process_launch_for_paint(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
@@ -2290,11 +2385,13 @@ class AutoCruiseTests(unittest.TestCase):
             recent_actions=[],
         )
         plan = toolset.plan_next_action("ペイントを開いて簡単な猫の線画を描いて下さい。", observation, [], context)
-        self.assertEqual(plan.action.type, ActionType.HOTKEY)
-        self.assertEqual(plan.action.hotkey, "WIN+R")
-        self.assertEqual(plan.action.target.fallback_visual_hint, "screen:run-dialog")
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.shell_kind, "process")
+        self.assertEqual(plan.action.shell_command, "mspaint")
+        self.assertTrue(plan.action.shell_detach)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "launch:paint")
 
-    def test_windows_toolset_types_mspaint_in_run_dialog(self) -> None:
+    def test_windows_toolset_falls_back_to_run_dialog_after_failed_process_launch(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
@@ -2323,10 +2420,57 @@ class AutoCruiseTests(unittest.TestCase):
             focused_element="ControlType.Edit:Open",
             textual_hints=["Run", "Open"],
             recent_actions=[],
+            raw_ref={
+                "last_execution": {
+                    "success": True,
+                    "details": "Started detached process",
+                    "error": "",
+                    "payload": {"kind": "process", "command": "mspaint"},
+                }
+            },
         )
-        plan = toolset.plan_next_action("ペイントを開いて簡単な猫の線画を描いて下さい。", observation, [], context)
+        plan = toolset.plan_next_action(
+            "ペイントを開いて簡単な猫の線画を描いて下さい。",
+            observation,
+            [],
+            {
+                **context,
+                "recent_failure_reason": "paint is not visible yet",
+            },
+        )
         self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
         self.assertEqual(plan.action.text, "mspaint")
+
+    def test_windows_toolset_prefers_direct_process_launch_for_notepad(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="メモ帳を開いて文章を書く",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="desktop.png",
+            active_window=WindowInfo(window_id=1, title="Desktop"),
+            visible_windows=[WindowInfo(window_id=1, title="Desktop")],
+            detected_elements=[],
+            ui_tree_summary="Desktop visible",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Desktop"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action("メモ帳を開いて文章を書く", observation, [], context)
+
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.shell_kind, "process")
+        self.assertEqual(plan.action.shell_command, "notepad")
+        self.assertTrue(plan.action.shell_detach)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "launch:notepad")
 
     def test_windows_validation_requires_real_paint_window_for_launch_marker(self) -> None:
         toolset = self._make_windows_toolset()
@@ -2355,6 +2499,50 @@ class AutoCruiseTests(unittest.TestCase):
         result = toolset.validate_outcome(action.expected_outcome, current, previous_observation=previous, action=action)
         self.assertFalse(result.success)
         self.assertIn("paint is not visible yet", result.details.lower())
+
+    def test_windows_validation_accepts_notepad_launch_marker_from_window_class(self) -> None:
+        toolset = self._make_windows_toolset()
+        previous = self._observation("before.ppm")
+        action = Action(
+            type=ActionType.SHELL_EXECUTE,
+            target=TargetRef(
+                window_title="Notepad",
+                name="Notepad",
+                fallback_visual_hint="launch:notepad",
+            ),
+            purpose="Launch Notepad",
+            reason="Direct process launch is the shortest path.",
+            preconditions=[],
+            expected_outcome="Notepad is visible.",
+            confidence=0.96,
+            shell_kind="process",
+            shell_command="notepad",
+            shell_detach=True,
+        )
+        current = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=20, title="タイトルなし - メモ帳", class_name="Notepad"),
+            visible_windows=[WindowInfo(window_id=20, title="タイトルなし - メモ帳", class_name="Notepad")],
+            detected_elements=[],
+            ui_tree_summary="Japanese Notepad window visible",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Text Editor",
+            textual_hints=["メモ帳"],
+            recent_actions=[],
+            raw_ref={
+                "last_execution": {
+                    "success": True,
+                    "details": "Started detached process",
+                    "error": "",
+                    "payload": {"pid": 1234, "detach": True},
+                }
+            },
+        )
+
+        result = toolset.validate_outcome(action.expected_outcome, current, previous_observation=previous, action=action)
+
+        self.assertTrue(result.success)
+        self.assertIn("notepad", result.details.lower())
 
     def test_windows_verify_target_refines_drag_to_paint_canvas_bounds(self) -> None:
         toolset = self._make_windows_toolset()
@@ -2799,6 +2987,37 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(clipboard_writes, ["こんにちは", "before"])
         self.assertEqual(hotkeys, ["CTRL+V"])
 
+    def test_input_executor_focuses_window_using_launch_marker_app_key(self) -> None:
+        lookups: list[str] = []
+        focused: list[int] = []
+
+        class MarkerWindowManager:
+            def find_window(self, title: str):
+                lookups.append(title)
+                if title == "notepad":
+                    return WindowInfo(window_id=44, title="タイトルなし - メモ帳", class_name="Notepad")
+                return None
+
+            def focus_window(self, window_id: int) -> bool:
+                focused.append(window_id)
+                return True
+
+        executor = InputExecutor(MarkerWindowManager())
+        action = Action(
+            type=ActionType.TYPE_TEXT,
+            target=TargetRef(fallback_visual_hint="launch:notepad"),
+            purpose="Type into Notepad",
+            reason="Notepad should receive focus.",
+            preconditions=[],
+            expected_outcome="The text appears in Notepad.",
+            text="hello",
+        )
+
+        executor._focus_target_window(action)
+
+        self.assertEqual(lookups, ["notepad"])
+        self.assertEqual(focused, [44])
+
     def test_input_executor_maps_relative_drag_points_to_canvas_bounds(self) -> None:
         executor = InputExecutor(DummyWindowManager())
         action = Action(
@@ -2885,6 +3104,106 @@ class AutoCruiseTests(unittest.TestCase):
         )
         self.assertFalse(result.success)
         self.assertIn("boom", result.error)
+
+    def test_shell_executor_runs_cmd_and_captures_output(self) -> None:
+        executor = ShellExecutor(self.temp_dir)
+        action = Action(
+            type=ActionType.SHELL_EXECUTE,
+            target=TargetRef(),
+            purpose="Inspect shell output",
+            reason="A command-line check is fastest.",
+            preconditions=[],
+            expected_outcome="The output is captured.",
+            shell_kind="cmd",
+            shell_command="echo hello-from-autocruise",
+            shell_timeout_seconds=10,
+        )
+
+        result = executor.execute(action)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.payload.get("exit_code"), 0)
+        self.assertIn("hello-from-autocruise", result.payload.get("stdout", "").lower())
+
+    def test_windows_toolset_routes_shell_execute_and_validates_from_execution_result(self) -> None:
+        observation = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=1, title="Visual Studio Code"),
+            visible_windows=[WindowInfo(window_id=1, title="Visual Studio Code")],
+            detected_elements=[],
+            ui_tree_summary="VS Code workspace",
+            cursor_position=(0, 0),
+            focused_element="editor",
+            textual_hints=["workspace"],
+            recent_actions=[],
+            raw_ref={"observation_kind": ObservationKind.STRUCTURED.value},
+        )
+        snapshot = PrimarySensorSnapshot(
+            active_window=observation.active_window,
+            focused_element="editor",
+            event_counts={},
+            active_automation_backend="uia",
+            fingerprint="shell-snapshot",
+        )
+        builder = RecordingObservationBuilder(observation)
+        shell_result = ExecutionResult(
+            success=True,
+            details="cmd exited with code 0. hello",
+            payload={
+                "kind": "cmd",
+                "command": "echo hello",
+                "cwd": str(self.temp_dir),
+                "detach": False,
+                "exit_code": 0,
+                "stdout": "hello",
+                "stderr": "",
+            },
+        )
+        shell_executor = DummyShellExecutor(shell_result)
+        toolset = WindowsAgentToolset(
+            root=self.temp_dir,
+            memory_path=self.paths.app_memory_path("excel"),
+            observation_builder=builder,
+            window_manager=DummyWindowManager(),
+            input_executor=DummyInputExecutor(),
+            uia_adapter=DummyUIAAdapter(),
+            live_planner=None,
+            primary_sensor=StaticPrimarySensorHub([snapshot]),
+            shell_executor=shell_executor,
+        )
+        action = Action(
+            type=ActionType.SHELL_EXECUTE,
+            target=TargetRef(),
+            purpose="Inspect repository state.",
+            reason="CLI is faster than GUI for this task.",
+            preconditions=[],
+            expected_outcome="The repository status is available for replanning.",
+            shell_kind="cmd",
+            shell_command="echo hello",
+        )
+
+        verification = toolset.verify_target(action, observation)
+        execution = toolset.execute_action(action)
+        postcheck = toolset.wait_for_expected_change(
+            "shell-demo",
+            action,
+            observation,
+            recent_actions=[],
+            execution_result=execution,
+        )
+        validation = toolset.validate_outcome(
+            action.expected_outcome,
+            postcheck,
+            previous_observation=observation,
+            action=action,
+        )
+
+        self.assertTrue(verification.matched)
+        self.assertEqual(shell_executor.actions[0].shell_command, "echo hello")
+        self.assertEqual(builder.structured_calls, 1)
+        self.assertEqual(postcheck.raw_ref["last_execution"]["payload"]["stdout"], "hello")
+        self.assertEqual(postcheck.raw_ref["screenshot_count"], 0)
+        self.assertTrue(validation.success)
 
     def _write_test_image(self, path: Path, color: QColor, accent_rect: tuple[int, int, int, int] | None = None) -> None:
         image = QImage(32, 32, QImage.Format_RGB32)

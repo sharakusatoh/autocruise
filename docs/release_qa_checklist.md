@@ -7,7 +7,7 @@ Use this checklist before shipping a Windows build. Record the build path, date,
 - Run `python -m unittest discover -s tests -v`.
 - Run `build_windows.bat`.
 - Confirm `release\AutoCruiseCE\AutoCruiseCE.exe` starts.
-- Confirm `release\AutoCruiseCE-portable-1.0.1.zip` exists.
+- Confirm `release\AutoCruiseCE-portable-<version>.zip` exists.
 - Confirm `autocruise\infrastructure\windows\uia_client.ps1` is present in the release folder.
 - Confirm Playwright or browser binaries are not bundled by default.
 

@@ -43,6 +43,7 @@ class ActionType(str, Enum):
     SCROLL = "scroll"
     WAIT = "wait"
     FOCUS_WINDOW = "focus_window"
+    SHELL_EXECUTE = "shell_execute"
 
 
 class AdapterMode(str, Enum):
@@ -178,6 +179,11 @@ class Action:
     drag_path: list[PointerPoint] = field(default_factory=list)
     drag_duration_ms: int = 0
     pointer_script: list[PointerStroke] = field(default_factory=list)
+    shell_kind: str = "powershell"
+    shell_command: str = ""
+    shell_cwd: str = ""
+    shell_timeout_seconds: int = 20
+    shell_detach: bool = False
     expected_signals: list[ExpectedSignal] = field(default_factory=list)
     wait_timeout_ms: int = 2200
 
@@ -227,6 +233,7 @@ class ExecutionResult:
     success: bool
     details: str
     error: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

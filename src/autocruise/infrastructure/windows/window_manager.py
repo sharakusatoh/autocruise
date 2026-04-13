@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import re
 from ctypes import wintypes
 
 from autocruise.domain.models import Bounds, WindowInfo
@@ -123,11 +124,18 @@ class WindowManager:
         return bool(user32.SetForegroundWindow(hwnd))
 
     def find_window(self, title_hint: str) -> WindowInfo | None:
-        hint = title_hint.lower()
+        hint = self._normalize_text(title_hint)
+        if not hint:
+            return None
         for window in self.list_windows():
-            if hint in window.title.lower():
+            window_title = self._normalize_text(window.title)
+            window_class = self._normalize_text(window.class_name)
+            if hint in window_title or hint in window_class:
                 return window
         return None
+
+    def _normalize_text(self, value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "")).casefold()
 
     def cursor_position(self) -> tuple[int, int]:
         point = POINT()

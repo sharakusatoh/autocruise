@@ -105,12 +105,19 @@ class LiveActionPlanner:
             "Always think at two levels: the overall objective route and the immediate next step. "
             "Treat browsers like any other Windows application. "
             "If the requested app is not open, launch it immediately using the shortest reliable Windows path. "
+            "For known Windows apps with a direct executable alias, prefer shell_execute with shell_kind process before using Win+R or Search. "
             f"{launch_hint}"
             "Use Search only when Run or a visible launcher item is not enough. Do not bounce between opening and closing Search. "
             "If one launcher path fails, switch to another direct path on the next step. "
             "If the app is starting, use wait only until the target UI is visible. "
             "Once the app is open, continue with the next concrete step such as selecting a tool, focusing a field, typing text, or drawing on a canvas. "
             "Use whichever combination of mouse, keyboard, menus, ribbons, toolbars, dialogs, shortcuts, and visible text gets to the goal fastest. "
+            "Use shell_execute when a terminal or direct process launch is faster and more reliable than GUI interaction. "
+            "Prefer shell_execute for development tasks, repository inspection, tests, builds, file-system bulk operations, and direct executable launch. "
+            "Use shell_kind powershell for Windows shell commands, cmd for cmd-style commands, and process to launch an executable directly. "
+            "If shell_execute does not need a visible UI change, leave expected_signals empty and keep wait_timeout_ms short. "
+            "If shell_execute should open an app window, use shell_kind process and set the target window title when you know it. "
+            "If shell_cwd is empty, the command will run in the current AutoCruise workspace root. "
             "Use type_text only for a focused or clearly editable field. Do not point type_text at buttons or launcher controls. "
             "After WIN+S opens Windows Search, assume the search field already has keyboard focus unless the screenshot clearly shows otherwise. "
             "Use hotkey for Enter, Tab, Escape, arrow keys, function keys, and modifier combinations. "
@@ -213,6 +220,7 @@ class LiveActionPlanner:
         automation = observation.raw_ref.get("automation", {}) if isinstance(observation.raw_ref, dict) else {}
         screen_understanding = observation.raw_ref.get("screen_understanding", {}) if isinstance(observation.raw_ref, dict) else {}
         sensor_snapshot = observation.raw_ref.get("sensor_snapshot", {}) if isinstance(observation.raw_ref, dict) else {}
+        last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
         observation_kind = observation.raw_ref.get("observation_kind", ObservationKind.FULL.value) if isinstance(observation.raw_ref, dict) else ObservationKind.FULL.value
         change_summary = observation.raw_ref.get("change_summary", "") if isinstance(observation.raw_ref, dict) else ""
         knowledge = []
@@ -263,6 +271,20 @@ class LiveActionPlanner:
                     "ui_candidates": (screen_understanding.get("ui_candidates") or [])[:8],
                     "ocr_text_blocks": (screen_understanding.get("ocr_text_blocks") or [])[:12],
                     "ocr_available": bool(screen_understanding.get("ocr_available", False)),
+                },
+                "last_action_result": {
+                    "success": bool(last_execution.get("success", False)),
+                    "details": str(last_execution.get("details", ""))[:400],
+                    "error": str(last_execution.get("error", ""))[:300],
+                    "payload": {
+                        "kind": str((last_execution.get("payload") or {}).get("kind", ""))[:40],
+                        "exit_code": (last_execution.get("payload") or {}).get("exit_code"),
+                        "stdout": str((last_execution.get("payload") or {}).get("stdout", ""))[:1000],
+                        "stderr": str((last_execution.get("payload") or {}).get("stderr", ""))[:700],
+                        "pid": (last_execution.get("payload") or {}).get("pid"),
+                        "cwd": str((last_execution.get("payload") or {}).get("cwd", ""))[:240],
+                        "detach": bool((last_execution.get("payload") or {}).get("detach", False)),
+                    },
                 },
                 "ui_summary": observation.ui_tree_summary[:700],
                 "focused_element": observation.focused_element,
@@ -338,6 +360,11 @@ class LiveActionPlanner:
             drag_path=self._parse_drag_path(action_payload.get("drag_path")),
             drag_duration_ms=max(0, int(action_payload.get("drag_duration_ms", 0) or 0)),
             pointer_script=self._parse_pointer_script(action_payload.get("pointer_script")),
+            shell_kind=self._parse_shell_kind(action_payload.get("shell_kind")),
+            shell_command=str(action_payload.get("shell_command", "")),
+            shell_cwd=str(action_payload.get("shell_cwd", "")),
+            shell_timeout_seconds=max(0, int(action_payload.get("shell_timeout_seconds", 0) or 0)),
+            shell_detach=bool(action_payload.get("shell_detach", False)),
             expected_signals=self._parse_expected_signals(action_payload.get("expected_signals")),
             wait_timeout_ms=max(0, int(action_payload.get("wait_timeout_ms", 0) or 0)),
         )
@@ -374,6 +401,10 @@ class LiveActionPlanner:
 
     def _default_expected_signals(self, action: Action) -> list[ExpectedSignal]:
         target_label = action.target.name or action.target.automation_id or action.target.window_title
+        if action.type == ActionType.SHELL_EXECUTE:
+            if action.shell_kind == "process":
+                return [ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=target_label or action.shell_command)]
+            return []
         if action.type == ActionType.CLICK:
             return [
                 ExpectedSignal(ExpectedSignalKind.ELEMENT_ENABLED_CHANGED, target=target_label),
@@ -392,6 +423,10 @@ class LiveActionPlanner:
         return [ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=target_label or action.type.value)]
 
     def _default_wait_timeout_ms(self, action: Action) -> int:
+        if action.type == ActionType.SHELL_EXECUTE:
+            if action.shell_kind == "process":
+                return 2500
+            return 200
         if action.type == ActionType.DRAG:
             return 900
         if action.type == ActionType.HOTKEY:
@@ -497,6 +532,11 @@ class LiveActionPlanner:
                                 "required": ["coordinate_mode", "duration_ms", "pause_after_ms", "button", "path"],
                             },
                         },
+                        "shell_kind": {"type": "string"},
+                        "shell_command": {"type": "string"},
+                        "shell_cwd": {"type": "string"},
+                        "shell_timeout_seconds": {"type": "integer"},
+                        "shell_detach": {"type": "boolean"},
                         "wait_timeout_ms": {"type": "integer"},
                         "expected_signals": {
                             "type": "array",
@@ -528,6 +568,11 @@ class LiveActionPlanner:
                         "drag_path",
                         "drag_duration_ms",
                         "pointer_script",
+                        "shell_kind",
+                        "shell_command",
+                        "shell_cwd",
+                        "shell_timeout_seconds",
+                        "shell_detach",
                         "wait_timeout_ms",
                         "expected_signals",
                     ],
@@ -588,6 +633,12 @@ class LiveActionPlanner:
         if normalized in {"relative", "canvas_relative", "normalized"}:
             return "relative"
         return "absolute"
+
+    def _parse_shell_kind(self, value: Any) -> str:
+        normalized = str(value or "powershell").strip().lower()
+        if normalized in {"powershell", "cmd", "process"}:
+            return normalized
+        return "powershell"
 
     def _parse_plan_outline(self, payload: Any) -> list[str]:
         if not isinstance(payload, list):

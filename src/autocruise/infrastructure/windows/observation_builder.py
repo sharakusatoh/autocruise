@@ -13,6 +13,9 @@ from autocruise.infrastructure.windows.visual_guidance import build_visual_guide
 from autocruise.infrastructure.windows.window_manager import WindowManager
 
 
+TRANSIENT_RAW_REF_KEYS = ("last_execution",)
+
+
 class WindowsObservationBuilder:
     def __init__(
         self,
@@ -82,11 +85,13 @@ class WindowsObservationBuilder:
     ) -> Observation:
         sensor_snapshot = sensor_snapshot or self.primary_sensor.snapshot()
         active_window = sensor_snapshot.active_window or self.window_manager.get_active_window()
-        visible_windows = (
-            list(previous_observation.visible_windows)
-            if previous_observation is not None and previous_observation.visible_windows
-            else ([active_window] if active_window is not None else [])
-        )
+        visible_windows = self.window_manager.list_windows()
+        if not visible_windows:
+            visible_windows = (
+                list(previous_observation.visible_windows)
+                if previous_observation is not None and previous_observation.visible_windows
+                else ([active_window] if active_window is not None else [])
+            )
         cursor_position = self.window_manager.cursor_position()
         screen_bounds = get_virtual_screen_bounds()
         return self._build_observation(
@@ -161,6 +166,7 @@ class WindowsObservationBuilder:
         playwright_available = bool(browser_snapshot.get("available"))
         summary = self._summarize(active_window, elements, visible_windows, cursor_position, sensor_snapshot, browser_snapshot)
         change_summary = self._change_summary(previous_observation, active_window, focused, elements, browser_snapshot)
+        carried_raw_ref = self._carry_forward_raw_ref(previous_observation)
         return Observation(
             screenshot_path=screenshot_path,
             active_window=active_window,
@@ -172,6 +178,7 @@ class WindowsObservationBuilder:
             textual_hints=self._textual_hints(active_hint, focused, elements, visible_windows, browser_snapshot),
             recent_actions=recent_actions[-5:],
             raw_ref={
+                **carried_raw_ref,
                 "mode": "windows",
                 "visible_window_count": len(visible_windows),
                 "screen_bounds": {
@@ -205,6 +212,15 @@ class WindowsObservationBuilder:
                 "vision_fallback_required": vision_fallback_required,
             },
         )
+
+    def _carry_forward_raw_ref(self, previous_observation: Observation | None) -> dict:
+        if previous_observation is None or not isinstance(previous_observation.raw_ref, dict):
+            return {}
+        carried: dict = {}
+        for key in TRANSIENT_RAW_REF_KEYS:
+            if key in previous_observation.raw_ref:
+                carried[key] = previous_observation.raw_ref[key]
+        return carried
 
     def _numbered_automation_elements(self, elements) -> list[dict]:
         numbered: list[dict] = []
