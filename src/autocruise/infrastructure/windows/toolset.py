@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 import uuid
@@ -240,9 +241,6 @@ class WindowsAgentToolset:
         context=None,
     ) -> PlanStep:
         retrieved_context, planning_meta = self._normalize_context(context)
-        completed_editor_step = self._complete_editor_goal_if_ready(goal, observation, recent_actions, retrieved_context)
-        if completed_editor_step is not None:
-            return completed_editor_step
         launch_step = self._plan_direct_app_launch(goal, observation, recent_actions, retrieved_context, planning_meta)
         if launch_step is not None:
             return self._with_wait_defaults(launch_step)
@@ -250,7 +248,6 @@ class WindowsAgentToolset:
         if self.live_planner is not None and not skip_live_replan:
             live_plan = self.live_planner.plan(goal, observation, recent_actions, context)
             if live_plan is not None:
-                live_plan = self._override_editor_wait(goal, observation, recent_actions, retrieved_context, live_plan)
                 return self._with_wait_defaults(live_plan)
 
         preferred_window = self._pick_window(goal, observation.visible_windows, retrieved_context)
@@ -259,9 +256,12 @@ class WindowsAgentToolset:
         ):
             return self._with_wait_defaults(self._focus_step(preferred_window))
 
+        explicit_text_step = self._plan_explicit_text_entry(goal, observation, recent_actions, retrieved_context)
+        if explicit_text_step is not None:
+            return self._with_wait_defaults(explicit_text_step)
+
         quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal) if item.strip()]
         editable_target = self._pick_edit_target(observation.detected_elements)
-        quoted = []
         if quoted and editable_target and not self._recently_repeated(
             recent_actions,
             ActionType.TYPE_TEXT,
@@ -288,16 +288,6 @@ class WindowsAgentToolset:
                 ),
                 reasoning="Quoted text plus a visible edit field is a direct text input fallback.",
             )
-
-        editor_step = self._plan_editor_text_entry(
-            goal,
-            observation,
-            recent_actions,
-            retrieved_context,
-            self._extract_requested_text(goal),
-        )
-        if editor_step is not None:
-            return self._with_wait_defaults(editor_step)
 
         normalized = goal.lower()
         direct_matches: list[tuple[int, Any]] = []
@@ -587,6 +577,13 @@ class WindowsAgentToolset:
                 return [ExpectedSignal(ExpectedSignalKind.DOM_MUTATION, target=target_label)]
             return [ExpectedSignal(ExpectedSignalKind.ELEMENT_APPEARED, target=target_label)]
         if action.type == ActionType.HOTKEY:
+            normalized_hotkey = self._normalize_text(action.hotkey)
+            if normalized_hotkey in {self._normalize_text("CTRL+S"), self._normalize_text("CTRL+SHIFT+S")}:
+                return [
+                    ExpectedSignal(ExpectedSignalKind.DIALOG_OPENED, target=target_label),
+                    ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=target_label),
+                    ExpectedSignal(ExpectedSignalKind.FOCUS_CHANGED, target=target_label),
+                ]
             if action.hotkey.strip().lower() in {"enter", "return"}:
                 return [
                     ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=target_label),
@@ -839,6 +836,8 @@ class WindowsAgentToolset:
         return any(action.type == ActionType.TYPE_TEXT and action.text == text for action in recent_actions[-3:])
 
     def _plan_direct_app_launch(self, goal: str, observation: Observation, recent_actions: list[Action], retrieved_context, planning_meta: dict[str, Any]) -> PlanStep | None:
+        if self._is_save_dialog_observation(observation):
+            return None
         app_key = self._requested_launch_app(goal, retrieved_context)
         if not app_key or self._observation_has_app(observation, app_key):
             return None
@@ -1087,19 +1086,49 @@ class WindowsAgentToolset:
             return True
         return any(self._is_edit_element(element.control_type) for element in observation.detected_elements)
 
+    def _extract_explicit_text(self, goal: str) -> str:
+        quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal, flags=re.DOTALL) if item.strip()]
+        if quoted:
+            return quoted[0]
+
+        patterns = (
+            r"(?:text|message|content|body)\s*[:：]\s*(.+)$",
+            r"(?:次の文|次の文章|次のテキスト|文章|テキスト|本文|内容)\s*[:：]\s*(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, goal, flags=re.IGNORECASE | re.DOTALL)
+            if not match:
+                continue
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n\"“”「『」』")
+            if candidate and len(candidate) <= 5000:
+                return candidate
+        return ""
+
+    def _plan_explicit_text_entry(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        retrieved_context,
+    ) -> PlanStep | None:
+        requested_text = self._extract_explicit_text(goal)
+        if not requested_text:
+            return None
+        if not self._looks_like_editor_goal(goal, retrieved_context):
+            return None
+        if not self._looks_like_editor_window(observation):
+            return None
+        editor_target = self._build_editor_target(observation)
+        if self._recently_repeated(recent_actions, ActionType.TYPE_TEXT, editor_target.name, requested_text):
+            return None
+        return self._build_editor_type_step(observation, requested_text)
+
     def _build_editor_type_step(self, observation: Observation, text: str) -> PlanStep | None:
         active_window = observation.active_window
         if active_window is None:
             return None
         edit_target = self._pick_edit_target(observation.detected_elements)
-        target = TargetRef(
-            window_title=active_window.title,
-            name=edit_target.name if edit_target else active_window.title,
-            automation_id=edit_target.automation_id if edit_target else "",
-            control_type=edit_target.control_type if edit_target else "ControlType.Document",
-            bounds=edit_target.bounds if edit_target else active_window.bounds,
-            fallback_visual_hint="editor:window",
-        )
+        target = self._build_editor_target(observation)
         return PlanStep(
             summary="Type the requested text into the active editor.",
             action=Action(
@@ -1120,14 +1149,7 @@ class WindowsAgentToolset:
         if active_window is None or active_window.bounds is None:
             return None
         edit_target = self._pick_edit_target(observation.detected_elements)
-        target = TargetRef(
-            window_title=active_window.title,
-            name=edit_target.name if edit_target else active_window.title,
-            automation_id=edit_target.automation_id if edit_target else "",
-            control_type=edit_target.control_type if edit_target else "ControlType.Document",
-            bounds=edit_target.bounds if edit_target else active_window.bounds,
-            fallback_visual_hint="editor:window",
-        )
+        target = self._build_editor_target(observation)
         return PlanStep(
             summary="Place the caret inside the active editor.",
             action=Action(
@@ -1142,6 +1164,258 @@ class WindowsAgentToolset:
             reasoning="A direct click into the editor is better than waiting.",
         )
 
+    def _build_editor_target(self, observation: Observation, *, fallback_hint: str = "editor:window") -> TargetRef:
+        active_window = observation.active_window
+        edit_target = self._pick_edit_target(observation.detected_elements)
+        stable_name = self._editor_anchor(observation, edit_target=edit_target)
+        return TargetRef(
+            window_title=active_window.title if active_window else "",
+            name=stable_name,
+            automation_id=edit_target.automation_id if edit_target else "",
+            control_type=edit_target.control_type if edit_target else "ControlType.Document",
+            bounds=edit_target.bounds if edit_target else (active_window.bounds if active_window else None),
+            fallback_visual_hint=fallback_hint,
+            search_terms=["editor", "document", "text", "file"],
+        )
+
+    def _editor_anchor(self, observation: Observation, *, edit_target=None) -> str:
+        edit_target = edit_target if edit_target is not None else self._pick_edit_target(observation.detected_elements)
+        if edit_target is not None:
+            for value in (edit_target.automation_id, edit_target.name, edit_target.control_type):
+                text = str(value or "").strip()
+                if text:
+                    return text
+        active_window = observation.active_window
+        if active_window is not None:
+            if active_window.class_name.strip():
+                return active_window.class_name.strip()
+            if active_window.title.strip():
+                return self._strip_editor_title_state(active_window.title)
+        return "editor_surface"
+
+    def _goal_requires_save(self, goal: str, retrieved_context) -> bool:
+        if not self._looks_like_editor_goal(goal, retrieved_context):
+            return False
+        normalized_goal = self._normalize_text(goal)
+        save_terms = (
+            "save",
+            "saveas",
+            "filename",
+            "filepath",
+            "保存",
+            "上書き保存",
+            "名前を付けて保存",
+            "ファイル名",
+        )
+        return any(self._normalize_text(term) in normalized_goal for term in save_terms)
+
+    def _editor_save_path(self, goal: str) -> str:
+        explicit = self._extract_requested_save_path(goal)
+        if explicit:
+            return explicit
+        documents_dir = Path.home() / "Documents"
+        if not documents_dir.exists():
+            documents_dir = Path.home()
+        digest = hashlib.sha1(goal.encode("utf-8", errors="ignore")).hexdigest()[:8]
+        return str((documents_dir / f"AutoCruiseCE-note-{digest}.txt").resolve())
+
+    def _extract_requested_save_path(self, goal: str) -> str:
+        patterns = (
+            r"([A-Za-z]:\\[^\"<>\r\n|?*]+\.(?:txt|md|log|json|csv))",
+            r"((?:\.{0,2}[\\/])[^\"<>\r\n|?*]+\.(?:txt|md|log|json|csv))",
+            r"(?:save(?:\s+as)?|filename|file\s*name|named|保存(?:して)?|ファイル名|名前)\s*[:：]?\s*[\"“]?([^\"”\r\n]+\.(?:txt|md|log|json|csv))",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, goal, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = str(match.group(1)).strip().strip("\"“”")
+            if candidate:
+                return candidate
+        return ""
+
+    def _is_save_dialog_observation(self, observation: Observation) -> bool:
+        normalized_evidence = [self._normalize_text(value) for value in self._observation_evidence(observation)]
+        dialog_terms = (
+            self._normalize_text("save as"),
+            self._normalize_text("file name"),
+            self._normalize_text("filename"),
+            self._normalize_text("名前を付けて保存"),
+            self._normalize_text("ファイル名"),
+        )
+        if any(any(term and term in value for term in dialog_terms) for value in normalized_evidence):
+            return True
+        has_filename = any(self._normalize_text("file name") in value or self._normalize_text("filename") in value or self._normalize_text("ファイル名") in value for value in normalized_evidence)
+        has_save = any(self._normalize_text("save") in value or self._normalize_text("保存") in value for value in normalized_evidence)
+        return has_filename and has_save
+
+    def _editor_window_looks_unsaved(self, observation: Observation) -> bool:
+        title = observation.active_window.title if observation.active_window else ""
+        stripped = self._strip_editor_title_state(title)
+        normalized_title = self._normalize_text(stripped)
+        untitled_terms = (
+            "untitled",
+            "無題",
+            "タイトルなし",
+        )
+        if any(self._normalize_text(term) in normalized_title for term in untitled_terms):
+            return True
+        return any(marker in title for marker in ("*", "●", "•"))
+
+    def _strip_editor_title_state(self, title: str) -> str:
+        stripped = str(title or "").strip()
+        for marker in ("*", "●", "•"):
+            stripped = stripped.replace(marker, "")
+        return stripped.strip()
+
+    def _same_editor_context(self, action: Action, observation: Observation, editor_anchor: str) -> bool:
+        marker = (action.target.fallback_visual_hint or "").strip().lower()
+        if marker.startswith("editor:"):
+            return True
+        action_anchor = self._normalize_text(action.target.automation_id or action.target.name or action.target.control_type)
+        current_anchor = self._normalize_text(editor_anchor)
+        if action_anchor and current_anchor and action_anchor == current_anchor:
+            return True
+        current_title = self._normalize_text(self._strip_editor_title_state(observation.active_window.title if observation.active_window else ""))
+        action_title = self._normalize_text(self._strip_editor_title_state(action.target.window_title))
+        return bool(current_title and action_title and current_title == action_title)
+
+    def _recent_hotkey_match(self, recent_actions: list[Action], hotkey: str, editor_anchor: str) -> bool:
+        normalized_hotkey = self._normalize_text(hotkey)
+        normalized_anchor = self._normalize_text(editor_anchor)
+        for action in recent_actions[-4:]:
+            if action.type != ActionType.HOTKEY:
+                continue
+            if self._normalize_text(action.hotkey) != normalized_hotkey:
+                continue
+            marker = (action.target.fallback_visual_hint or "").strip().lower()
+            action_anchor = self._normalize_text(action.target.automation_id or action.target.name or action.target.control_type)
+            if marker.startswith("editor:") or (normalized_anchor and action_anchor == normalized_anchor):
+                return True
+        return False
+
+    def _recent_type_text_match(self, recent_actions: list[Action], text: str, editor_anchor: str) -> bool:
+        normalized_anchor = self._normalize_text(editor_anchor)
+        for action in recent_actions[-4:]:
+            if action.type != ActionType.TYPE_TEXT:
+                continue
+            if action.text != text:
+                continue
+            marker = (action.target.fallback_visual_hint or "").strip().lower()
+            action_anchor = self._normalize_text(action.target.automation_id or action.target.name or action.target.control_type)
+            if marker.startswith("editor:") or (normalized_anchor and action_anchor == normalized_anchor):
+                return True
+        return False
+
+    def _build_editor_hotkey_step(
+        self,
+        observation: Observation,
+        *,
+        hotkey: str,
+        summary: str,
+        purpose: str,
+        reason: str,
+        expected_outcome: str,
+        fallback_hint: str,
+    ) -> PlanStep:
+        return PlanStep(
+            summary=summary,
+            action=Action(
+                type=ActionType.HOTKEY,
+                target=self._build_editor_target(observation, fallback_hint=fallback_hint),
+                purpose=purpose,
+                reason=reason,
+                preconditions=["The editor window is visible."],
+                expected_outcome=expected_outcome,
+                confidence=0.84,
+                hotkey=hotkey,
+            ),
+            reasoning="The editor shortcut is the shortest reliable way to continue the writing task.",
+        )
+
+    def _build_save_dialog_type_step(self, observation: Observation, save_path: str) -> PlanStep:
+        return PlanStep(
+            summary="Enter the save path into the Save dialog.",
+            action=Action(
+                type=ActionType.TYPE_TEXT,
+                target=self._build_editor_target(observation, fallback_hint="editor:save-dialog"),
+                purpose="Enter the destination file path into the Save dialog.",
+                reason="The save dialog is open and needs a concrete file path before confirming.",
+                preconditions=["The Save dialog is visible and the file name field is editable."],
+                expected_outcome="The Save dialog file name field contains the target file path.",
+                confidence=0.82,
+                text=save_path,
+            ),
+            reasoning="Typing the destination path directly is faster than navigating folders manually.",
+        )
+
+    def _plan_editor_save_action(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        retrieved_context,
+    ) -> PlanStep | None:
+        if not self._goal_requires_save(goal, retrieved_context):
+            return None
+        if not self._looks_like_editor_window(observation) and not self._is_save_dialog_observation(observation):
+            return None
+        editor_anchor = self._editor_anchor(observation)
+        save_path = self._editor_save_path(goal)
+        if self._editor_save_recently_completed(observation, recent_actions, editor_anchor, save_path):
+            return None
+        if self._is_save_dialog_observation(observation):
+            if self._recent_type_text_match(recent_actions, save_path, editor_anchor) or self._observation_contains_text(observation, Path(save_path).name):
+                if not self._recent_hotkey_match(recent_actions, "ENTER", editor_anchor):
+                    return self._build_editor_hotkey_step(
+                        observation,
+                        hotkey="ENTER",
+                        summary="Confirm the Save dialog.",
+                        purpose="Confirm the current save path and save the file.",
+                        reason="The file path is ready, so the next step is to confirm the Save dialog.",
+                        expected_outcome="The Save dialog closes and the editor switches to the saved document.",
+                        fallback_hint="editor:saved",
+                    )
+                return None
+            if not self._recently_repeated(recent_actions, ActionType.TYPE_TEXT, editor_anchor, save_path):
+                return self._build_save_dialog_type_step(observation, save_path)
+            return None
+        if not self._recent_hotkey_match(recent_actions, "CTRL+S", editor_anchor):
+            return self._build_editor_hotkey_step(
+                observation,
+                hotkey="CTRL+S",
+                summary="Save the current editor document.",
+                purpose="Start the save flow for the current editor document.",
+                reason="The goal explicitly requires saving after the text is written.",
+                expected_outcome="The document save flow starts, or the editor saves the document immediately.",
+                fallback_hint="editor:save-request",
+            )
+        return None
+
+    def _editor_save_recently_completed(
+        self,
+        observation: Observation,
+        recent_actions: list[Action],
+        editor_anchor: str,
+        save_path: str,
+    ) -> bool:
+        if self._is_save_dialog_observation(observation):
+            return False
+        basename = Path(save_path).name if save_path else ""
+        if basename and self._observation_contains_text(observation, basename):
+            return True
+        if not recent_actions:
+            return False
+        recent_editor_hotkey = any(
+            action.type == ActionType.HOTKEY
+            and self._normalize_text(action.hotkey) in {self._normalize_text("CTRL+S"), self._normalize_text("ENTER")}
+            and self._same_editor_context(action, observation, editor_anchor)
+            for action in recent_actions[-4:]
+        )
+        if not recent_editor_hotkey:
+            return False
+        return self._looks_like_editor_window(observation) and not self._editor_window_looks_unsaved(observation)
+
     def _plan_editor_text_entry(
         self,
         goal: str,
@@ -1152,26 +1426,41 @@ class WindowsAgentToolset:
     ) -> PlanStep | None:
         if not self._looks_like_editor_goal(goal, retrieved_context):
             return None
+        if self._is_save_dialog_observation(observation):
+            save_step = self._plan_editor_save_action(goal, observation, recent_actions, retrieved_context)
+            if save_step is not None:
+                return self._with_wait_defaults(save_step)
+            return None
         if not self._looks_like_editor_window(observation):
+            save_step = self._plan_editor_save_action(goal, observation, recent_actions, retrieved_context)
+            if save_step is not None:
+                return self._with_wait_defaults(save_step)
             return None
 
-        active_title = observation.active_window.title if observation.active_window else ""
+        editor_anchor = self._editor_anchor(observation)
         draft_text = self._synthesize_editor_text_draft(goal, retrieved_context, requested_text)
+        completion_text = requested_text or ""
         if draft_text:
-            if self._editor_text_recently_completed(observation, recent_actions, active_title, draft_text):
+            if self._editor_text_recently_completed(observation, recent_actions, editor_anchor, completion_text):
+                save_step = self._plan_editor_save_action(goal, observation, recent_actions, retrieved_context)
+                if save_step is not None:
+                    return self._with_wait_defaults(save_step)
                 return PlanStep(
                     summary="The requested text has already been entered.",
                     is_complete=True,
                     completion_reason="The editor already contains the most recent requested text entry.",
                     reasoning="A successful text entry was already sent to the active editor, so repeating it would not make progress.",
                 )
-            if self._recently_repeated(recent_actions, ActionType.TYPE_TEXT, active_title, draft_text):
+            if self._recently_repeated(recent_actions, ActionType.TYPE_TEXT, editor_anchor, draft_text):
                 return None
-            return self._build_editor_type_step(observation, draft_text)
+            return self._with_wait_defaults(self._build_editor_type_step(observation, draft_text))
 
         if not self._is_edit_focus(observation.focused_element):
-            if not self._recently_repeated(recent_actions, ActionType.CLICK, active_title):
-                return self._build_editor_click_step(observation)
+            if not self._recently_repeated(recent_actions, ActionType.CLICK, editor_anchor):
+                return self._with_wait_defaults(self._build_editor_click_step(observation))
+        save_step = self._plan_editor_save_action(goal, observation, recent_actions, retrieved_context)
+        if save_step is not None:
+            return self._with_wait_defaults(save_step)
         return None
 
     def _override_editor_wait(
@@ -1208,11 +1497,21 @@ class WindowsAgentToolset:
             return None
         requested_text = self._extract_requested_text(goal)
         draft_text = self._synthesize_editor_text_draft(goal, retrieved_context, requested_text)
-        active_title = observation.active_window.title if observation.active_window else ""
+        editor_anchor = self._editor_anchor(observation)
         if not draft_text:
             return None
-        if not self._editor_text_recently_completed(observation, recent_actions, active_title, draft_text):
+        if not self._editor_text_recently_completed(observation, recent_actions, editor_anchor, requested_text or ""):
             return None
+        if self._goal_requires_save(goal, retrieved_context):
+            save_path = self._editor_save_path(goal)
+            if not self._editor_save_recently_completed(observation, recent_actions, editor_anchor, save_path):
+                return None
+            return PlanStep(
+                summary="The requested writing and save task is complete.",
+                is_complete=True,
+                completion_reason="The requested text was entered into the active editor and the document was saved.",
+                reasoning="The editor already contains the goal-aligned text and the save flow completed successfully.",
+            )
         return PlanStep(
             summary="The requested writing task is complete.",
             is_complete=True,
@@ -1224,18 +1523,19 @@ class WindowsAgentToolset:
         self,
         observation: Observation,
         recent_actions: list[Action],
-        active_title: str,
+        editor_anchor: str,
         text: str,
     ) -> bool:
-        if not recent_actions or not text:
+        if not recent_actions:
             return False
         last_action = recent_actions[-1]
         if last_action.type != ActionType.TYPE_TEXT:
             return False
-        last_target = last_action.target.name or last_action.target.window_title
-        if active_title and last_target and last_target != active_title and last_action.target.window_title != active_title:
+        if not self._same_editor_context(last_action, observation, editor_anchor):
             return False
-        if last_action.text != text:
+        if text and last_action.text != text:
+            return False
+        if not text and not str(last_action.text or "").strip():
             return False
         last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
         return bool(last_execution.get("success"))
@@ -1544,6 +1844,21 @@ class WindowsAgentToolset:
             if self._observation_has_app(observation, app_key):
                 return ValidationResult(True, 0.9, action.expected_outcome or f"{app_key} is visible.")
             return ValidationResult(False, 0.26, f"{app_key} is not visible yet")
+        if marker == "editor:save-request":
+            if self._is_save_dialog_observation(observation):
+                return ValidationResult(True, 0.9, action.expected_outcome or "The Save dialog is visible.")
+            if self._looks_like_editor_window(observation) and not self._editor_window_looks_unsaved(observation):
+                return ValidationResult(True, 0.82, action.expected_outcome or "The editor document is now saved.")
+            return ValidationResult(False, 0.28, "The editor save flow has not started yet")
+        if marker == "editor:saved":
+            basename = ""
+            if action.text:
+                basename = Path(action.text).name
+            if basename and self._observation_contains_text(observation, basename):
+                return ValidationResult(True, 0.88, action.expected_outcome or "The saved file name is visible.")
+            if not self._is_save_dialog_observation(observation) and self._looks_like_editor_window(observation) and not self._editor_window_looks_unsaved(observation):
+                return ValidationResult(True, 0.84, action.expected_outcome or "The editor returned to a saved document.")
+            return ValidationResult(False, 0.28, "The Save dialog is still open or the document still looks unsaved")
         return None
 
     def _observation_contains_text(self, observation: Observation, text: str) -> bool:

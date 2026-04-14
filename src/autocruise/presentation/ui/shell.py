@@ -223,12 +223,12 @@ class FloatingControlWidget(QWidget):
         header.setSpacing(10)
         self.logo_label = QLabel()
         self.logo_label.setStyleSheet("background: transparent;")
-        self.logo_label.setPixmap(app_icon(size=48).pixmap(28, 28))
-        self.logo_label.setFixedSize(28, 28)
+        self.logo_label.setPixmap(app_icon(size=48).pixmap(30, 30))
+        self.logo_label.setFixedSize(30, 30)
         self.logo_label.setScaledContents(True)
         header.addWidget(self.logo_label, 0, Qt.AlignVCenter)
         self.title_label = QLabel(APP_TITLE)
-        self.title_label.setStyleSheet(f"color: {COLORS.text_primary}; font-size: 24px; font-weight: 700; background: transparent;")
+        self.title_label.setStyleSheet(f"color: {COLORS.text_primary}; font-size: 21px; font-weight: 700; background: transparent;")
         header.addWidget(self.title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
         self.status_badge = StatusBadge(tr("status.ready"), "ready")
@@ -431,7 +431,7 @@ class MainWindow(QMainWindow):
     def _ensure_floating_controls(self) -> FloatingControlWidget:
         if self.floating_controls is None:
             controls = FloatingControlWidget()
-            controls.set_logo_pixmap(self._load_brand_pixmap(28))
+            controls.set_logo_pixmap(self._load_brand_pixmap(30))
             controls.open_requested.connect(self._show_main_window)
             controls.pause_requested.connect(self._toggle_pause)
             controls.stop_requested.connect(self._stop_session)
@@ -1038,7 +1038,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.sidebar_logo.setPixmap(self._load_brand_pixmap(40))
         if self.floating_controls is not None:
-            self.floating_controls.set_logo_pixmap(self._load_brand_pixmap(20))
+            self.floating_controls.set_logo_pixmap(self._load_brand_pixmap(30))
         self.sidebar_buttons["home"].setText(tr("sidebar.new_thread"))
         self.sidebar_buttons["knowledge"].setText(tr("tab.knowledge"))
         self.sidebar_buttons["schedules"].setText(tr("tab.schedules"))

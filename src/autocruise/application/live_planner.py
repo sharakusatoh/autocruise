@@ -124,8 +124,15 @@ class LiveActionPlanner:
             "Use target.backend_hint only when you have a clear preference such as uia, playwright, or cdp. Otherwise leave it empty. "
             "If the goal is to write text in Notepad or another editor and that editor window is already visible, do not wait. "
             "Return type_text immediately, or click once inside the editor and then type_text on the next step. "
+            "If the latest action already wrote the requested text into the active editor, do not type the same text again. "
+            "Move to the next missing step such as saving or completing the task. "
+            "If repeat_guard.avoid_signature is set, do not repeat that same action signature unless the UI materially changed. "
+            "When a previous action already succeeded and the observation is stable, choose the next missing step instead of replaying the last one. "
             "If requested_text is present in the prompt payload, use it exactly. "
             "If requested_text is empty but text_authoring_goal is true, infer the intended content from the goal itself and put a concise, goal-aligned draft in action.text. "
+            "If save_requested is true and the text is already in the editor, prefer Ctrl+S. "
+            "If save_dialog_visible is true, enter save_path_hint into the file name field and confirm with Enter. "
+            "Do not declare completion for a save-requested editor task until the save dialog is gone or the editor clearly shows the saved file. "
             "After WIN+S opens Windows Search, assume the search field already has keyboard focus unless the screenshot clearly shows otherwise. "
             "Use hotkey for Enter, Tab, Escape, arrow keys, function keys, and modifier combinations. "
             "For drawing or painting tasks, think in vector-like strokes. "
@@ -230,9 +237,13 @@ class LiveActionPlanner:
         last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
         observation_kind = observation.raw_ref.get("observation_kind", ObservationKind.FULL.value) if isinstance(observation.raw_ref, dict) else ObservationKind.FULL.value
         change_summary = observation.raw_ref.get("change_summary", "") if isinstance(observation.raw_ref, dict) else ""
+        repeat_guard = planning_meta.get("repeat_guard", {}) if isinstance(planning_meta, dict) else {}
         requested_text = self._extract_requested_text(goal)
         text_authoring_goal = self._looks_like_text_authoring_goal(goal, context)
         editor_window_visible = self._editor_window_visible(observation)
+        save_requested = self._save_requested(goal, context)
+        save_dialog_visible = self._save_dialog_visible(observation)
+        save_path_hint = self._save_path_hint(goal) if save_requested else ""
         knowledge = []
         if context:
             for selection in context.selections[:4]:
@@ -259,9 +270,19 @@ class LiveActionPlanner:
                 "remaining_step_budget": planning_meta.get("remaining_steps", 0),
                 "recent_failure_reason": planning_meta.get("recent_failure_reason", ""),
                 "recent_failure_count": planning_meta.get("recent_failure_count", 0),
+                "repeat_guard": {
+                    "last_action_signature": str(repeat_guard.get("last_action_signature", "")),
+                    "previous_action_signature": str(repeat_guard.get("previous_action_signature", "")),
+                    "repeat_streak": int(repeat_guard.get("repeat_streak", 0) or 0),
+                    "observation_stable": bool(repeat_guard.get("observation_stable", False)),
+                    "avoid_signature": str(repeat_guard.get("avoid_signature", "")),
+                },
                 "text_authoring_goal": text_authoring_goal,
                 "requested_text": requested_text,
                 "editor_window_visible": editor_window_visible,
+                "save_requested": save_requested,
+                "save_dialog_visible": save_dialog_visible,
+                "save_path_hint": save_path_hint,
                 "active_window": observation.active_window.title if observation.active_window else "",
                 "active_window_bounds": (
                     asdict(observation.active_window.bounds)
@@ -369,6 +390,40 @@ class LiveActionPlanner:
         if any(term.casefold() in normalized for term in terms):
             return True
         return bool(context and "notepad" in getattr(context, "app_candidates", []))
+
+    def _save_requested(self, goal: str, context: RetrievedContext | None) -> bool:
+        if not self._looks_like_text_authoring_goal(goal, context):
+            return False
+        normalized = goal.casefold()
+        terms = ("save", "save as", "filename", "保存", "上書き保存", "名前を付けて保存", "ファイル名")
+        return any(term.casefold() in normalized for term in terms)
+
+    def _save_dialog_visible(self, observation: Observation) -> bool:
+        evidence = " ".join(
+            [
+                observation.active_window.title if observation.active_window else "",
+                observation.focused_element,
+                observation.ui_tree_summary,
+                *observation.textual_hints[:10],
+            ]
+        ).casefold()
+        terms = ("save as", "file name", "filename", "名前を付けて保存", "ファイル名")
+        return any(term.casefold() in evidence for term in terms)
+
+    def _save_path_hint(self, goal: str) -> str:
+        patterns = (
+            r"([A-Za-z]:\\[^\"<>\r\n|?*]+\.(?:txt|md|log|json|csv))",
+            r"((?:\.{0,2}[\\/])[^\"<>\r\n|?*]+\.(?:txt|md|log|json|csv))",
+            r"(?:save(?:\s+as)?|filename|file\s*name|named|保存(?:して)?|ファイル名|名前)\s*[:：]?\s*[\"“]?([^\"”\r\n]+\.(?:txt|md|log|json|csv))",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, goal, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = str(match.group(1)).strip().strip("\"“”")
+            if candidate:
+                return candidate
+        return ""
 
     def _editor_window_visible(self, observation: Observation) -> bool:
         active_window = observation.active_window

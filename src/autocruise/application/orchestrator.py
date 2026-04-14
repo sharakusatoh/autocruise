@@ -10,6 +10,7 @@ from autocruise.application.retrieval import RetrievalPlanner
 from autocruise.application.state_machine import InvalidStateTransition, SessionStateMachine
 from autocruise.domain.models import (
     Action,
+    ActionType,
     CompletedData,
     ExecutingData,
     FailedData,
@@ -195,6 +196,8 @@ class SessionOrchestrator:
                         last_failure_reason,
                         failure_counts,
                         autonomy_mode,
+                        recent_actions,
+                        observation,
                     ),
                 )
                 self._emit("plan", {"plan": plan})
@@ -217,6 +220,29 @@ class SessionOrchestrator:
                 action = plan.action
                 snapshot.last_action = action
                 snapshot.summary = plan.summary
+                repeat_reason = self._detect_repeated_action_without_progress(action, recent_actions, snapshot.current_observation)
+                if repeat_reason:
+                    failure_count = self._record_failure(failure_counts, repeat_reason)
+                    last_failure_reason = repeat_reason
+                    if replans >= MAX_REPLANS_PER_STEP or failure_count > MAX_REPEAT_FAILURES:
+                        return self._finalize_history(
+                            self._fail(snapshot, repeat_reason),
+                            step_count,
+                            confirmation_notes,
+                            learning_updates,
+                        )
+                    replans += 1
+                    snapshot = self._transition(
+                        snapshot,
+                        SessionState.REPLANNING,
+                        ReplanningData(failure_reason=repeat_reason, attempt=replans),
+                        "Repeated action without new progress; replanning",
+                    )
+                    reuse_postcheck_observation = True
+                    context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=repeat_reason)
+                    snapshot.retrieved_context = context
+                    self._log_retrieval(session_id, context)
+                    continue
                 stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
                 if stopped is not None:
                     return stopped
@@ -512,7 +538,10 @@ class SessionOrchestrator:
         last_failure_reason: str,
         failure_counts: dict[str, int],
         autonomy_mode: str,
+        recent_actions: list[Action] | None = None,
+        observation=None,
     ) -> dict[str, object]:
+        repeat_guard = self._repeat_guard_payload(recent_actions or [], observation)
         return {
             "session_id": session_id,
             "retrieved_context": retrieved_context,
@@ -522,8 +551,65 @@ class SessionOrchestrator:
             "remaining_steps": max(max_steps - step_count, 0) if max_steps is not None else None,
             "recent_failure_reason": last_failure_reason,
             "recent_failure_count": failure_counts.get(last_failure_reason, 0) if last_failure_reason else 0,
+            "repeat_guard": repeat_guard,
             "confirmation_policy": "Do not ask the user. Keep progressing and finish the task unless the desktop is genuinely blocked.",
         }
+
+    def _repeat_guard_payload(self, recent_actions: list[Action], observation) -> dict[str, object]:
+        last_signature = self._action_signature(recent_actions[-1]) if recent_actions else ""
+        previous_signature = self._action_signature(recent_actions[-2]) if len(recent_actions) >= 2 else ""
+        stable = self._observation_is_stable(observation)
+        return {
+            "last_action_signature": last_signature,
+            "previous_action_signature": previous_signature,
+            "repeat_streak": 2 if last_signature and last_signature == previous_signature else (1 if last_signature else 0),
+            "observation_stable": stable,
+            "avoid_signature": last_signature if stable and last_signature else "",
+        }
+
+    def _detect_repeated_action_without_progress(self, action: Action, recent_actions: list[Action], observation) -> str:
+        if not recent_actions or observation is None:
+            return ""
+        if action.type not in {
+            ActionType.CLICK,
+            ActionType.TYPE_TEXT,
+            ActionType.HOTKEY,
+            ActionType.FOCUS_WINDOW,
+            ActionType.SHELL_EXECUTE,
+        }:
+            return ""
+        if not self._observation_is_stable(observation):
+            return ""
+        current_signature = self._action_signature(action)
+        if not current_signature:
+            return ""
+        if current_signature != self._action_signature(recent_actions[-1]):
+            return ""
+        return f"Repeated action without new progress: {current_signature}"
+
+    def _observation_is_stable(self, observation) -> bool:
+        if observation is None or not isinstance(getattr(observation, "raw_ref", None), dict):
+            return False
+        raw_ref = observation.raw_ref
+        change_summary = str(raw_ref.get("change_summary", "")).strip().lower()
+        planner_skip_reason = str(raw_ref.get("planner_skip_reason", "")).strip().lower()
+        if planner_skip_reason == "sensor_unchanged":
+            return True
+        return change_summary in {"", "no structured changes.", "no structured changes"}
+
+    def _action_signature(self, action: Action | None) -> str:
+        if action is None:
+            return ""
+        target = action.target.automation_id or action.target.name or action.target.window_title
+        parts = [action.type.value, str(target or "").strip().lower()]
+        if action.type == ActionType.TYPE_TEXT:
+            parts.append(str(action.text or "").strip())
+        elif action.type == ActionType.HOTKEY:
+            parts.append(str(action.hotkey or "").strip().lower())
+        elif action.type == ActionType.SHELL_EXECUTE:
+            parts.append(str(action.shell_kind or "").strip().lower())
+            parts.append(str(action.shell_command or "").strip().lower())
+        return "|".join(parts)
 
     def _record_failure(self, failure_counts: dict[str, int], reason: str) -> int:
         if not reason:

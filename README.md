@@ -2,7 +2,7 @@
 
 `autocruise` is the source repository for AutoCruise. At this stage, **AutoCruise CE** is the main implementation in the repository.
 
-Current source and packaged release version: `1.0.3`
+Current source and packaged release version: `1.1.0`
 
 AutoCruise CE is an experimental, early-stage Windows desktop operator built around Codex App Server and ChatGPT sign-in. It observes the current desktop, uses structured Windows automation where available, plans the next action, executes mouse and keyboard input, and iterates until the task completes or the run stops.
 
@@ -106,6 +106,7 @@ Typical release outputs:
 
 ## Latest Release Notes
 
+- `1.1.0`: shifted AutoCruise CE further toward model-led planning by thinning editor-specific fallback rules, adding generic repeat guards, preserving explicit text-entry fallback, and refining the compact floating window header balance.
 - `1.0.3`: reduced hardcoded filler behavior around text-authoring tasks, improved stop and shutdown handling, and tightened Notepad/editor completion logic so successful text entry stops instead of repeating.
 - `1.0.2`: expanded direct process launch preference for known Windows apps before falling back to Run or Search, reducing launcher-related friction on common desktop tasks.
 

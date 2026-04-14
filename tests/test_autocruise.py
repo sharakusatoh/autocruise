@@ -182,8 +182,12 @@ class RecordingProviderClient(ProviderClient):
         self.image_path = ""
         self.session_key = ""
         self.output_schema = None
+        self.prompt = ""
+        self.instructions = ""
 
     def generate_text(self, settings, api_key, instructions, prompt, image_path=None, session_key=None, output_schema=None):
+        self.instructions = instructions
+        self.prompt = prompt
         self.image_path = image_path or ""
         self.session_key = session_key or ""
         self.output_schema = output_schema
@@ -1308,6 +1312,129 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIn("expected_signals", client.output_schema["properties"]["action"]["properties"])
         self.assertIn("search_terms", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
         self.assertIn("backend_hint", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
+
+    def test_live_planner_prompt_includes_repeat_guard_and_save_flags(self) -> None:
+        settings = type(
+            "Settings",
+            (),
+            {
+                "provider": "codex",
+                "base_url": "codex app-server",
+                "model": "gpt-5.4",
+                "timeout_seconds": 30,
+                "retry_count": 0,
+                "max_tokens": 500,
+                "allow_images": True,
+                "is_default": True,
+            },
+        )()
+        client = RecordingProviderClient(
+            json.dumps(
+                {
+                    "summary": "Press Ctrl+S.",
+                    "reasoning": "The text is already written, so the next missing step is to save it.",
+                    "plan_outline": ["save the document"],
+                    "is_complete": False,
+                    "completion_reason": "",
+                    "action": {
+                        "type": "hotkey",
+                        "target": {
+                            "window_title": "Untitled - Notepad",
+                            "automation_id": "",
+                            "name": "editor_surface",
+                            "control_type": "ControlType.Document",
+                            "fallback_visual_hint": "editor:window",
+                            "search_terms": [],
+                            "backend_hint": "",
+                        },
+                        "purpose": "Save the current document.",
+                        "reason": "The user requested saving after writing.",
+                        "preconditions": [],
+                        "expected_outcome": "The save flow starts.",
+                        "risk_level": "low",
+                        "confidence": 0.7,
+                        "text": "",
+                        "hotkey": "CTRL+S",
+                        "scroll_amount": 0,
+                        "drag_coordinate_mode": "absolute",
+                        "drag_path": [],
+                        "drag_duration_ms": 0,
+                        "pointer_script": [],
+                        "shell_kind": "powershell",
+                        "shell_command": "",
+                        "shell_cwd": "",
+                        "shell_timeout_seconds": 20,
+                        "shell_detach": False,
+                        "wait_timeout_ms": 1000,
+                        "expected_signals": [],
+                    },
+                }
+            )
+        )
+
+        class RecordingRegistry:
+            def get(self, provider: str):
+                return client
+
+        planner = LiveActionPlanner(
+            provider_repo=FakeProviderRepo(settings),
+            secret_store=FakeSecretStore(""),
+            provider_registry=RecordingRegistry(),
+        )
+        observation = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=1, title="*Untitled - Notepad", class_name="Notepad"),
+            visible_windows=[WindowInfo(window_id=1, title="*Untitled - Notepad", class_name="Notepad")],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor open",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["Notepad", "editor"],
+            recent_actions=[],
+            raw_ref={"observation_kind": ObservationKind.STRUCTURED.value, "vision_fallback_required": False},
+        )
+        recent_actions = [
+            Action(
+                type=ActionType.TYPE_TEXT,
+                target=TargetRef(window_title="Untitled - Notepad", name="editor_surface", control_type="ControlType.Document"),
+                purpose="Write the text",
+                reason="The editor is ready.",
+                preconditions=[],
+                expected_outcome="The text appears.",
+                text="Hello.",
+            ),
+            Action(
+                type=ActionType.TYPE_TEXT,
+                target=TargetRef(window_title="Untitled - Notepad", name="editor_surface", control_type="ControlType.Document"),
+                purpose="Write the text",
+                reason="The editor is ready.",
+                preconditions=[],
+                expected_outcome="The text appears.",
+                text="Hello.",
+            ),
+        ]
+
+        planner.plan(
+            "Open Notepad, write a self introduction, and save it.",
+            observation,
+            recent_actions,
+            {
+                "session_id": "session-repeat",
+                "repeat_guard": {
+                    "last_action_signature": "type_text|editor_surface|Hello.",
+                    "previous_action_signature": "type_text|editor_surface|Hello.",
+                    "repeat_streak": 2,
+                    "observation_stable": True,
+                    "avoid_signature": "type_text|editor_surface|Hello.",
+                },
+            },
+        )
+
+        payload = json.loads(client.prompt)
+        self.assertTrue(payload["save_requested"])
+        self.assertFalse(payload["save_dialog_visible"])
+        self.assertEqual(payload["repeat_guard"]["repeat_streak"], 2)
+        self.assertEqual(payload["repeat_guard"]["avoid_signature"], "type_text|editor_surface|Hello.")
 
     def test_live_planner_parses_target_search_terms_and_backend_hint(self) -> None:
         settings = type(
@@ -2598,9 +2725,9 @@ class AutoCruiseTests(unittest.TestCase):
         logo = widget.logo_label.pixmap()
         self.assertIsNotNone(logo)
         self.assertFalse(logo.isNull())
-        self.assertEqual(widget.logo_label.width(), 28)
+        self.assertEqual(widget.logo_label.width(), 30)
         self.assertIn("background: transparent", widget.logo_label.styleSheet())
-        self.assertIn("font-size: 24px", widget.title_label.styleSheet())
+        self.assertIn("font-size: 21px", widget.title_label.styleSheet())
 
     def test_windows_verify_target_uses_global_uia_lookup_for_visual_plan_targets(self) -> None:
         search_box = DetectedElement(
@@ -2819,11 +2946,11 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(plan.action.target.window_title, "Untitled - Notepad")
         self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
 
-    def test_windows_toolset_synthesizes_text_for_generic_notepad_writing_goal(self) -> None:
+    def test_windows_toolset_does_not_synthesize_text_for_generic_notepad_writing_goal(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="メモ帳を開いて、簡単な文章を書いてください。",
+                goal="Open Notepad and write a short sentence.",
                 stage="initial",
                 app_candidates=["notepad"],
                 task_candidates=["notepad_simple_writing"],
@@ -2832,26 +2959,26 @@ class AutoCruiseTests(unittest.TestCase):
         }
         observation = Observation(
             screenshot_path="notepad.png",
-            active_window=WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
-            visible_windows=[WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            active_window=WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
             detected_elements=[],
             ui_tree_summary="Notepad editor window is open.",
             cursor_position=(0, 0),
             focused_element="ControlType.Document:Document",
-            textual_hints=["メモ帳", "editor"],
+            textual_hints=["Notepad", "editor"],
             recent_actions=[],
         )
 
-        plan = toolset.plan_next_action("メモ帳を開いて、簡単な文章を書いてください。", observation, [], context)
+        plan = toolset.plan_next_action("Open Notepad and write a short sentence.", observation, [], context)
 
-        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
-        self.assertEqual(plan.action.text, "こんにちは。これは簡単なメモです。")
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.WAIT)
 
-    def test_windows_toolset_synthesizes_self_introduction_for_notepad_goal(self) -> None:
+    def test_windows_toolset_does_not_synthesize_self_introduction_for_notepad_goal(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="メモ帳に自己紹介を書いて",
+                goal="Open Notepad and write a self introduction.",
                 stage="initial",
                 app_candidates=["notepad"],
                 task_candidates=["notepad_simple_writing"],
@@ -2860,49 +2987,49 @@ class AutoCruiseTests(unittest.TestCase):
         }
         observation = Observation(
             screenshot_path="notepad.png",
-            active_window=WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
-            visible_windows=[WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            active_window=WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
             detected_elements=[],
             ui_tree_summary="Notepad editor window is open.",
             cursor_position=(0, 0),
             focused_element="ControlType.Document:Document",
-            textual_hints=["メモ帳", "editor"],
+            textual_hints=["Notepad", "editor"],
             recent_actions=[],
         )
 
-        plan = toolset.plan_next_action("メモ帳に自己紹介を書いて", observation, [], context)
+        plan = toolset.plan_next_action("Open Notepad and write a self introduction.", observation, [], context)
 
-        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
-        self.assertIn("私はAutoCruise CEです", plan.action.text)
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.WAIT)
 
-    def test_windows_toolset_completes_after_successful_editor_text_entry(self) -> None:
+    def test_windows_toolset_does_not_auto_complete_after_successful_editor_text_entry(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="メモ帳に自己紹介を書いて",
+                goal="Open Notepad and write a self introduction.",
                 stage="initial",
                 app_candidates=["notepad"],
                 task_candidates=["notepad_simple_writing"],
                 selections=[],
             )
         }
-        text = "こんにちは。私はAutoCruise CEです。Windows上の操作を支援するデスクトップオペレーターです。よろしくお願いします。"
+        text = "Hello. I am AutoCruise CE, a Windows desktop operator."
         observation = Observation(
             screenshot_path="notepad.png",
-            active_window=WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
-            visible_windows=[WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            active_window=WindowInfo(window_id=10, title="*Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="*Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
             detected_elements=[],
             ui_tree_summary="Notepad editor window is open.",
             cursor_position=(0, 0),
             focused_element="ControlType.Document:Document",
-            textual_hints=["メモ帳", "editor"],
+            textual_hints=["Notepad", "editor", text],
             recent_actions=[],
             raw_ref={"last_execution": {"success": True, "details": "Pasted text", "error": "", "payload": {}}},
         )
         recent_actions = [
             Action(
                 type=ActionType.TYPE_TEXT,
-                target=TargetRef(window_title="タイトルなし - メモ帳", control_type="ControlType.Document"),
+                target=TargetRef(window_title="Untitled - Notepad", control_type="ControlType.Document"),
                 purpose="Type into Notepad",
                 reason="The editor is ready.",
                 preconditions=[],
@@ -2911,9 +3038,209 @@ class AutoCruiseTests(unittest.TestCase):
             )
         ]
 
-        plan = toolset.plan_next_action("メモ帳に自己紹介を書いて", observation, recent_actions, context)
+        plan = toolset.plan_next_action("Open Notepad and write a self introduction.", observation, recent_actions, context)
 
-        self.assertTrue(plan.is_complete)
+        self.assertFalse(plan.is_complete)
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.WAIT)
+
+    def test_windows_toolset_does_not_repeat_editor_text_when_title_changes_after_edit(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="Open Notepad, write a self introduction.",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        text = "Hello. I am AutoCruise CE, a Windows desktop operator."
+        observation = Observation(
+            screenshot_path="notepad-after.png",
+            active_window=WindowInfo(
+                window_id=10,
+                title="*Hello. I am AutoCruise CE, a Windows desktop operator. - Notepad",
+                class_name="Notepad",
+                bounds=Bounds(100, 100, 900, 640),
+            ),
+            visible_windows=[
+                WindowInfo(
+                    window_id=10,
+                    title="*Hello. I am AutoCruise CE, a Windows desktop operator. - Notepad",
+                    class_name="Notepad",
+                    bounds=Bounds(100, 100, 900, 640),
+                )
+            ],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["Notepad", text],
+            recent_actions=[],
+            raw_ref={"last_execution": {"success": True, "details": "Pasted text", "error": "", "payload": {}}},
+        )
+        recent_actions = [
+            Action(
+                type=ActionType.TYPE_TEXT,
+                target=TargetRef(
+                    window_title="Untitled - Notepad",
+                    name="editor_surface",
+                    control_type="ControlType.Document",
+                    fallback_visual_hint="editor:window",
+                ),
+                purpose="Type into Notepad",
+                reason="The editor is ready.",
+                preconditions=[],
+                expected_outcome="The editor content updates.",
+                text=text,
+            )
+        ]
+
+        plan = toolset.plan_next_action("Open Notepad, write a self introduction.", observation, recent_actions, context)
+
+        self.assertFalse(plan.is_complete)
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.WAIT)
+
+    def test_windows_toolset_requests_save_after_successful_editor_text_entry(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="Open Notepad, write a self introduction, and save it.",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        text = "Hello. I am AutoCruise CE, a Windows desktop operator."
+        observation = Observation(
+            screenshot_path="notepad-after.png",
+            active_window=WindowInfo(
+                window_id=10,
+                title="*Hello. I am AutoCruise CE, a Windows desktop operator. - Notepad",
+                class_name="Notepad",
+                bounds=Bounds(100, 100, 900, 640),
+            ),
+            visible_windows=[
+                WindowInfo(
+                    window_id=10,
+                    title="*Hello. I am AutoCruise CE, a Windows desktop operator. - Notepad",
+                    class_name="Notepad",
+                    bounds=Bounds(100, 100, 900, 640),
+                )
+            ],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["Notepad", text],
+            recent_actions=[],
+            raw_ref={"last_execution": {"success": True, "details": "Pasted text", "error": "", "payload": {}}},
+        )
+        recent_actions = [
+            Action(
+                type=ActionType.TYPE_TEXT,
+                target=TargetRef(
+                    window_title="Untitled - Notepad",
+                    name="editor_surface",
+                    control_type="ControlType.Document",
+                    fallback_visual_hint="editor:window",
+                ),
+                purpose="Type into Notepad",
+                reason="The editor is ready.",
+                preconditions=[],
+                expected_outcome="The editor content updates.",
+                text=text,
+            )
+        ]
+
+        plan = toolset.plan_next_action("Open Notepad, write a self introduction, and save it.", observation, recent_actions, context)
+
+        self.assertFalse(plan.is_complete)
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.WAIT)
+
+    def test_windows_toolset_handles_save_dialog_after_ctrl_s(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="Open Notepad, write a self introduction, and save it.",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="save-dialog.png",
+            active_window=WindowInfo(
+                window_id=11,
+                title="Save As",
+                class_name="#32770",
+                bounds=Bounds(140, 140, 900, 620),
+            ),
+            visible_windows=[
+                WindowInfo(
+                    window_id=11,
+                    title="Save As",
+                    class_name="#32770",
+                    bounds=Bounds(140, 140, 900, 620),
+                )
+            ],
+            detected_elements=[
+                DetectedElement(
+                    window_id=11,
+                    name="File name",
+                    automation_id="1001",
+                    control_type="ControlType.Edit",
+                    bounds=Bounds(220, 680, 420, 24),
+                    confidence=0.9,
+                )
+            ],
+            ui_tree_summary="Save As dialog open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Edit:File name",
+            textual_hints=["Save As", "File name"],
+            recent_actions=[],
+            raw_ref={"last_execution": {"success": True, "details": "Pressed Ctrl+S", "error": "", "payload": {}}},
+        )
+        recent_actions = [
+            Action(
+                type=ActionType.TYPE_TEXT,
+                target=TargetRef(
+                    window_title="Untitled - Notepad",
+                    name="editor_surface",
+                    control_type="ControlType.Document",
+                    fallback_visual_hint="editor:window",
+                ),
+                purpose="Type into Notepad",
+                reason="The editor is ready.",
+                preconditions=[],
+                expected_outcome="The editor content updates.",
+                text="Hello. I am AutoCruise CE, a Windows desktop operator.",
+            ),
+            Action(
+                type=ActionType.HOTKEY,
+                target=TargetRef(
+                    window_title="Untitled - Notepad",
+                    name="editor_surface",
+                    control_type="ControlType.Document",
+                    fallback_visual_hint="editor:save-request",
+                ),
+                purpose="Save the document",
+                reason="The goal requires saving.",
+                preconditions=[],
+                expected_outcome="The document save flow starts.",
+                hotkey="CTRL+S",
+            ),
+        ]
+
+        plan = toolset.plan_next_action("Open Notepad, write a self introduction, and save it.", observation, recent_actions, context)
+
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.WAIT)
 
     def test_windows_validation_requires_real_paint_window_for_launch_marker(self) -> None:
         toolset = self._make_windows_toolset()

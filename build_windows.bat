@@ -12,7 +12,7 @@ set "INSTALLER_SCRIPT=%~dp0installer\AutoCruiseCE.iss"
 set "INSTALLER_DIR=%RELEASE_DIR%\installer"
 
 for /f %%i in ('python -c "import sys; sys.path.insert(0, r'%~dp0src'); from autocruise.version import APP_VERSION; print(APP_VERSION, end='') "') do set "APP_VERSION=%%i"
-if "%APP_VERSION%"=="" set "APP_VERSION=1.0.3"
+if "%APP_VERSION%"=="" set "APP_VERSION=1.1.0"
 
 if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
 if not exist "%INSTALLER_DIR%" mkdir "%INSTALLER_DIR%"
