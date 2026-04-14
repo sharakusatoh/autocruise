@@ -67,6 +67,7 @@ ALLOWED_TRANSITIONS: dict[SessionState, set[SessionState]] = {
     },
     SessionState.LEARNING_UPDATE: {
         SessionState.OBSERVING,
+        SessionState.PLANNING,
         SessionState.COMPLETED,
         SessionState.STOPPED,
         SessionState.FAILED,

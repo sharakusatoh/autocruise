@@ -39,7 +39,11 @@ from autocruise.domain.models import (
     LoadingContextData,
     Observation,
     ObservationKind,
+    ObservingData,
+    PlanningData,
     PlanStep,
+    PostcheckData,
+    PrecheckData,
     PointerPoint,
     PointerStroke,
     PrimarySensorSnapshot,
@@ -49,6 +53,7 @@ from autocruise.domain.models import (
     ScheduledJobState,
     SessionMission,
     SessionState,
+    LearningUpdateData,
     TargetRef,
     WindowInfo,
     utc_now,
@@ -515,6 +520,59 @@ class AutoCruiseTests(unittest.TestCase):
                 "invalid",
             )
 
+    def test_state_machine_allows_learning_update_to_planning(self) -> None:
+        machine = SessionStateMachine()
+        snapshot = machine.create("s1", SessionMission("test"))
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.LOADING_CONTEXT,
+            LoadingContextData(goal="test", stage="initial"),
+            "start",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.OBSERVING,
+            ObservingData(reason="observe"),
+            "observe",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.PLANNING,
+            PlanningData(goal="test"),
+            "plan",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.PRECHECK,
+            PrecheckData(action_summary="precheck"),
+            "precheck",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.EXECUTING,
+            ExecutingData(action_summary="execute"),
+            "execute",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.POSTCHECK,
+            PostcheckData(action_summary="postcheck"),
+            "postcheck",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.LEARNING_UPDATE,
+            LearningUpdateData(entries=1),
+            "learn",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.PLANNING,
+            PlanningData(goal="test"),
+            "reuse observation and plan again",
+        )
+        self.assertEqual(snapshot.state, SessionState.PLANNING)
+
     def test_retrieval_prefers_excel_context(self) -> None:
         planner = RetrievalPlanner(self.temp_dir)
         context = planner.retrieve("Clean this Excel spreadsheet", stage="initial")
@@ -546,6 +604,12 @@ class AutoCruiseTests(unittest.TestCase):
         constitution = next(selection for selection in context.selections if Path(selection.path).name == "constitution.md")
         self.assertNotIn("安全", constitution.excerpt)
         self.assertNotIn("approval", constitution.excerpt.lower())
+
+    def test_retrieval_matches_notepad_writing_templates(self) -> None:
+        planner = RetrievalPlanner(ROOT)
+        context = planner.retrieve("メモ帳を開いて、次の文章を書いてください。", stage="initial")
+        self.assertIn("notepad", context.app_candidates)
+        self.assertIn("notepad_simple_writing", context.task_candidates)
 
     def test_workspace_paths_systemprompt_resolution_prefers_updated_bundled_prompt(self) -> None:
         data_root = self.temp_dir / "runtime-data"
@@ -680,6 +744,81 @@ class AutoCruiseTests(unittest.TestCase):
         result = orchestrator.run("Open Notepad")
         self.assertEqual(result.state, SessionState.FAILED)
         self.assertIn("toolset init failed", getattr(result.payload, "reason", ""))
+
+    def test_orchestrator_stop_before_execute_prevents_late_action(self) -> None:
+        orchestrator: SessionOrchestrator | None = None
+
+        class StopBeforeExecuteToolset:
+            def __init__(self) -> None:
+                self.execute_calls = 0
+                self.observation = Observation(
+                    screenshot_path=None,
+                    active_window=WindowInfo(window_id=1, title="タイトルなし - メモ帳", class_name="Notepad"),
+                    visible_windows=[WindowInfo(window_id=1, title="タイトルなし - メモ帳", class_name="Notepad")],
+                    detected_elements=[],
+                    ui_tree_summary="Notepad window",
+                    cursor_position=(0, 0),
+                    focused_element="ControlType.Document",
+                    textual_hints=["メモ帳"],
+                    recent_actions=[],
+                )
+
+            def capture_observation(self, session_id, **kwargs):
+                return self.observation
+
+            def list_windows(self):
+                return []
+
+            def focus_window(self, window_id: int) -> bool:
+                return True
+
+            def find_elements(self, query: str):
+                return []
+
+            def plan_next_action(self, goal: str, observation, recent_actions, context=None) -> PlanStep:
+                return PlanStep(
+                    summary="Type into Notepad",
+                    action=Action(
+                        type=ActionType.TYPE_TEXT,
+                        target=TargetRef(window_title="タイトルなし - メモ帳", control_type="ControlType.Document"),
+                        purpose="Type text",
+                        reason="Editor is visible",
+                        preconditions=[],
+                        expected_outcome="Text appears",
+                        text="こんにちは",
+                    ),
+                )
+
+            def verify_target(self, action: Action, observation):
+                assert orchestrator is not None
+                orchestrator.stop()
+                return type("Verification", (), {"matched": True, "confidence": 1.0, "reason": ""})()
+
+            def execute_action(self, action: Action):
+                self.execute_calls += 1
+                return ExecutionResult(success=True, details="typed", error="")
+
+            def wait_for_expected_change(self, session_id: str, action: Action, previous_observation, **kwargs):
+                return self.observation
+
+            def validate_outcome(self, expected_outcome: str, observation, previous_observation=None, action: Action | None = None):
+                return type("Validation", (), {"success": True, "confidence": 1.0, "details": expected_outcome})()
+
+            def update_memory(self, entry) -> None:
+                return None
+
+            def abort_session(self, reason: str) -> None:
+                return None
+
+            def build_learning_entry(self, session_id: str, action: Action, observation, app_name: str, task_name: str = ""):
+                raise AssertionError("learning should not run after stop")
+
+        toolset = StopBeforeExecuteToolset()
+        orchestrator = SessionOrchestrator(self.paths, toolset_factory=lambda: toolset)
+        result = orchestrator.run("メモ帳を開いて文章を書いてください。")
+
+        self.assertEqual(result.state, SessionState.STOPPED)
+        self.assertEqual(toolset.execute_calls, 0)
 
     def test_live_planner_parses_codex_response_without_api_key(self) -> None:
         settings = type(
@@ -1167,6 +1306,88 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(client.image_path, "")
         self.assertIsInstance(client.output_schema, dict)
         self.assertIn("expected_signals", client.output_schema["properties"]["action"]["properties"])
+        self.assertIn("search_terms", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
+        self.assertIn("backend_hint", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
+
+    def test_live_planner_parses_target_search_terms_and_backend_hint(self) -> None:
+        settings = type(
+            "Settings",
+            (),
+            {
+                "provider": "codex",
+                "base_url": "codex app-server",
+                "model": "gpt-5.4",
+                "timeout_seconds": 30,
+                "retry_count": 0,
+                "max_tokens": 500,
+                "allow_images": True,
+                "is_default": True,
+            },
+        )()
+        planner = LiveActionPlanner(
+            provider_repo=FakeProviderRepo(settings),
+            secret_store=FakeSecretStore(""),
+            provider_registry=FakeProviderRegistry(
+                json.dumps(
+                    {
+                        "summary": "Focus the address bar.",
+                        "reasoning": "The browser is open.",
+                        "plan_outline": [],
+                        "is_complete": False,
+                        "completion_reason": "",
+                        "action": {
+                            "type": "click",
+                            "target": {
+                                "window_title": "Edge",
+                                "automation_id": "",
+                                "name": "",
+                                "control_type": "ControlType.Edit",
+                                "fallback_visual_hint": "",
+                                "search_terms": ["address bar", "search bar"],
+                                "backend_hint": "playwright",
+                            },
+                            "purpose": "Focus the address bar.",
+                            "reason": "The next step is navigation.",
+                            "preconditions": [],
+                            "expected_outcome": "The address bar is focused.",
+                            "risk_level": "low",
+                            "confidence": 0.7,
+                            "text": "",
+                            "hotkey": "",
+                            "scroll_amount": 0,
+                            "drag_coordinate_mode": "absolute",
+                            "drag_path": [],
+                            "drag_duration_ms": 0,
+                            "pointer_script": [],
+                            "shell_kind": "powershell",
+                            "shell_command": "",
+                            "shell_cwd": "",
+                            "shell_timeout_seconds": 20,
+                            "shell_detach": False,
+                            "wait_timeout_ms": 1200,
+                            "expected_signals": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+        )
+        observation = Observation(
+            screenshot_path="demo.png",
+            active_window=WindowInfo(window_id=1, title="Edge"),
+            visible_windows=[WindowInfo(window_id=1, title="Edge")],
+            detected_elements=[],
+            ui_tree_summary="Edge browser page",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=[],
+            recent_actions=[],
+        )
+
+        plan = planner.plan("Open a page in Edge", observation, [], {"session_id": "schema-demo"})
+
+        self.assertEqual(plan.action.target.search_terms, ["address bar", "search bar"])
+        self.assertEqual(plan.action.target.backend_hint, "playwright")
 
     def test_live_planner_uses_contextual_paint_launch_hint_without_code_bias(self) -> None:
         settings = type(
@@ -1561,8 +1782,8 @@ class AutoCruiseTests(unittest.TestCase):
         )
 
     def test_build_product_footer_uses_codex_edition_copy(self) -> None:
-        product_text, creator_text = build_product_footer("1.0.2", "Sharaku Satoh")
-        self.assertEqual(product_text, "AutoCruise Codex Edition Version 1.0.2")
+        product_text, creator_text = build_product_footer("1.0.3", "Sharaku Satoh")
+        self.assertEqual(product_text, "AutoCruise Codex Edition Version 1.0.3")
         self.assertEqual(creator_text, "Created by Sharaku Satoh")
 
     def test_compact_panel_copy_truncates_and_keeps_full_tooltip_text(self) -> None:
@@ -1834,6 +2055,53 @@ class AutoCruiseTests(unittest.TestCase):
             focused_element="ControlType.Edit:Search",
             textual_hints=["Search", "GIMP"],
             recent_actions=[],
+        )
+        result = toolset.validate_outcome(
+            action.expected_outcome,
+            current,
+            previous_observation=previous,
+            action=action,
+        )
+        self.assertTrue(result.success)
+
+    def test_windows_validation_accepts_successful_editor_input_without_visible_ocr_text(self) -> None:
+        action = Action(
+            type=ActionType.TYPE_TEXT,
+            target=TargetRef(
+                window_title="Untitled - Notepad",
+                control_type="ControlType.Document",
+                bounds=Bounds(100, 100, 900, 640),
+                fallback_visual_hint="editor:window",
+            ),
+            purpose="Type into Notepad",
+            reason="The editor is ready.",
+            preconditions=[],
+            expected_outcome="The editor content updates.",
+            text="こんにちは",
+        )
+        toolset = self._make_windows_toolset()
+        previous = Observation(
+            screenshot_path="before.ppm",
+            active_window=WindowInfo(window_id=1, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=1, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window.",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Notepad"],
+            recent_actions=[],
+        )
+        current = Observation(
+            screenshot_path="after.ppm",
+            active_window=WindowInfo(window_id=1, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=1, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window.",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Notepad"],
+            recent_actions=[],
+            raw_ref={"last_execution": {"success": True, "details": "Pasted text: 5 chars", "error": "", "payload": {}}},
         )
         result = toolset.validate_outcome(
             action.expected_outcome,
@@ -2236,6 +2504,52 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(elements, [element])
         self.assertFalse(router.should_use_vision_fallback(elements))
 
+    def test_automation_router_resolve_target_prefers_backend_hint_and_search_terms(self) -> None:
+        uia_element = AutomationElementState(
+            backend=AutomationBackend.UIA,
+            element_id="uia-1",
+            name="Address field",
+            automation_id="AddressField",
+            control_type="ControlType.Edit",
+            role="textbox",
+        )
+        playwright_element = AutomationElementState(
+            backend=AutomationBackend.PLAYWRIGHT,
+            element_id="pw-1",
+            name="Address and search bar",
+            automation_id="omnibox",
+            control_type="textbox",
+            role="textbox",
+        )
+
+        class UiaAdapter:
+            backend = AutomationBackend.UIA
+
+            def find(self, query: str, *, limit: int = 20):
+                _ = limit
+                return [uia_element] if "address" in query.lower() else []
+
+        class PlaywrightAdapterStub:
+            backend = AutomationBackend.PLAYWRIGHT
+
+            def find(self, query: str, *, limit: int = 20):
+                _ = limit
+                return [playwright_element] if "search bar" in query.lower() else []
+
+        router = AutomationRouter([UiaAdapter(), PlaywrightAdapterStub()])
+
+        resolved = router.resolve_target(
+            TargetRef(
+                control_type="textbox",
+                search_terms=["search bar", "address bar"],
+                backend_hint="playwright",
+            )
+        )
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.backend, AutomationBackend.PLAYWRIGHT)
+        self.assertEqual(resolved.element_id, "pw-1")
+
     def test_playwright_adapter_uses_locator_first_priority(self) -> None:
         page = FakePlaywrightPage()
         adapter = PlaywrightAdapter(page)
@@ -2284,6 +2598,9 @@ class AutoCruiseTests(unittest.TestCase):
         logo = widget.logo_label.pixmap()
         self.assertIsNotNone(logo)
         self.assertFalse(logo.isNull())
+        self.assertEqual(widget.logo_label.width(), 28)
+        self.assertIn("background: transparent", widget.logo_label.styleSheet())
+        self.assertIn("font-size: 24px", widget.title_label.styleSheet())
 
     def test_windows_verify_target_uses_global_uia_lookup_for_visual_plan_targets(self) -> None:
         search_box = DetectedElement(
@@ -2471,6 +2788,132 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(plan.action.shell_command, "notepad")
         self.assertTrue(plan.action.shell_detach)
         self.assertEqual(plan.action.target.fallback_visual_hint, "launch:notepad")
+
+    def test_windows_toolset_types_requested_text_into_active_notepad_without_waiting(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="メモ帳を開いて、「こんにちは」と書いてください。",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="notepad.png",
+            active_window=WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Notepad", "editor"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action("メモ帳を開いて、「こんにちは」と書いてください。", observation, [], context)
+
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertEqual(plan.action.text, "こんにちは")
+        self.assertEqual(plan.action.target.window_title, "Untitled - Notepad")
+        self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
+
+    def test_windows_toolset_synthesizes_text_for_generic_notepad_writing_goal(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="メモ帳を開いて、簡単な文章を書いてください。",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="notepad.png",
+            active_window=WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["メモ帳", "editor"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action("メモ帳を開いて、簡単な文章を書いてください。", observation, [], context)
+
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertEqual(plan.action.text, "こんにちは。これは簡単なメモです。")
+
+    def test_windows_toolset_synthesizes_self_introduction_for_notepad_goal(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="メモ帳に自己紹介を書いて",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="notepad.png",
+            active_window=WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["メモ帳", "editor"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action("メモ帳に自己紹介を書いて", observation, [], context)
+
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertIn("私はAutoCruise CEです", plan.action.text)
+
+    def test_windows_toolset_completes_after_successful_editor_text_entry(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="メモ帳に自己紹介を書いて",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        text = "こんにちは。私はAutoCruise CEです。Windows上の操作を支援するデスクトップオペレーターです。よろしくお願いします。"
+        observation = Observation(
+            screenshot_path="notepad.png",
+            active_window=WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="タイトルなし - メモ帳", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["メモ帳", "editor"],
+            recent_actions=[],
+            raw_ref={"last_execution": {"success": True, "details": "Pasted text", "error": "", "payload": {}}},
+        )
+        recent_actions = [
+            Action(
+                type=ActionType.TYPE_TEXT,
+                target=TargetRef(window_title="タイトルなし - メモ帳", control_type="ControlType.Document"),
+                purpose="Type into Notepad",
+                reason="The editor is ready.",
+                preconditions=[],
+                expected_outcome="The editor content updates.",
+                text=text,
+            )
+        ]
+
+        plan = toolset.plan_next_action("メモ帳に自己紹介を書いて", observation, recent_actions, context)
+
+        self.assertTrue(plan.is_complete)
 
     def test_windows_validation_requires_real_paint_window_for_launch_marker(self) -> None:
         toolset = self._make_windows_toolset()
@@ -3017,6 +3460,57 @@ class AutoCruiseTests(unittest.TestCase):
 
         self.assertEqual(lookups, ["notepad"])
         self.assertEqual(focused, [44])
+
+    def test_input_executor_clicks_window_anchor_and_prefers_paste_for_notepad_document(self) -> None:
+        cursor_positions: list[tuple[int, int]] = []
+        mouse_events: list[int] = []
+        original_set_cursor = input_user32.SetCursorPos
+        original_mouse_event = input_user32.mouse_event
+        original_sleep = time.sleep
+        input_user32.SetCursorPos = lambda x, y: cursor_positions.append((x, y)) or True
+        input_user32.mouse_event = lambda flags, dx, dy, data, extra: mouse_events.append(flags)
+        time.sleep = lambda seconds: None
+
+        class EditorWindowManager:
+            def find_window(self, title: str):
+                if title in {"Notepad", "Document"}:
+                    return WindowInfo(window_id=51, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 80, 500, 360))
+                return None
+
+            def find_editable_child(self, window_id: int):
+                if window_id == 51:
+                    return WindowInfo(window_id=52, title="", class_name="RichEditD2DPT", bounds=Bounds(120, 120, 420, 260))
+                return None
+
+            def focus_window(self, window_id: int) -> bool:
+                return window_id == 51
+
+        executor = InputExecutor(EditorWindowManager())
+        paste_preferences: list[bool] = []
+        original_send_text = executor._send_text
+        executor._send_text = lambda text, *, prefer_paste=False: paste_preferences.append(prefer_paste) or (True, f"Typed text: {len(text)} chars")
+        try:
+            ok, _ = executor.execute(
+                Action(
+                    type=ActionType.TYPE_TEXT,
+                    target=TargetRef(window_title="Notepad", name="Document", control_type="ControlType.Document"),
+                    purpose="Type into Notepad",
+                    reason="The editor should receive input.",
+                    preconditions=[],
+                    expected_outcome="Text appears in the editor.",
+                    text="hello world",
+                )
+            )
+        finally:
+            executor._send_text = original_send_text
+            input_user32.SetCursorPos = original_set_cursor
+            input_user32.mouse_event = original_mouse_event
+            time.sleep = original_sleep
+
+        self.assertTrue(ok)
+        self.assertEqual(cursor_positions, [(330, 250)])
+        self.assertEqual(mouse_events[:2], [0x0002, 0x0004])
+        self.assertEqual(paste_preferences, [True])
 
     def test_input_executor_maps_relative_drag_points_to_canvas_bounds(self) -> None:
         executor = InputExecutor(DummyWindowManager())

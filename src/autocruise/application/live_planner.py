@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -119,6 +120,12 @@ class LiveActionPlanner:
             "If shell_execute should open an app window, use shell_kind process and set the target window title when you know it. "
             "If shell_cwd is empty, the command will run in the current AutoCruise workspace root. "
             "Use type_text only for a focused or clearly editable field. Do not point type_text at buttons or launcher controls. "
+            "In target.search_terms, provide 1 to 4 short text cues that help resolve the target semantically when exact automation ids are unavailable. "
+            "Use target.backend_hint only when you have a clear preference such as uia, playwright, or cdp. Otherwise leave it empty. "
+            "If the goal is to write text in Notepad or another editor and that editor window is already visible, do not wait. "
+            "Return type_text immediately, or click once inside the editor and then type_text on the next step. "
+            "If requested_text is present in the prompt payload, use it exactly. "
+            "If requested_text is empty but text_authoring_goal is true, infer the intended content from the goal itself and put a concise, goal-aligned draft in action.text. "
             "After WIN+S opens Windows Search, assume the search field already has keyboard focus unless the screenshot clearly shows otherwise. "
             "Use hotkey for Enter, Tab, Escape, arrow keys, function keys, and modifier combinations. "
             "For drawing or painting tasks, think in vector-like strokes. "
@@ -223,6 +230,9 @@ class LiveActionPlanner:
         last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
         observation_kind = observation.raw_ref.get("observation_kind", ObservationKind.FULL.value) if isinstance(observation.raw_ref, dict) else ObservationKind.FULL.value
         change_summary = observation.raw_ref.get("change_summary", "") if isinstance(observation.raw_ref, dict) else ""
+        requested_text = self._extract_requested_text(goal)
+        text_authoring_goal = self._looks_like_text_authoring_goal(goal, context)
+        editor_window_visible = self._editor_window_visible(observation)
         knowledge = []
         if context:
             for selection in context.selections[:4]:
@@ -249,6 +259,9 @@ class LiveActionPlanner:
                 "remaining_step_budget": planning_meta.get("remaining_steps", 0),
                 "recent_failure_reason": planning_meta.get("recent_failure_reason", ""),
                 "recent_failure_count": planning_meta.get("recent_failure_count", 0),
+                "text_authoring_goal": text_authoring_goal,
+                "requested_text": requested_text,
+                "editor_window_visible": editor_window_visible,
                 "active_window": observation.active_window.title if observation.active_window else "",
                 "active_window_bounds": (
                     asdict(observation.active_window.bounds)
@@ -312,6 +325,69 @@ class LiveActionPlanner:
             ensure_ascii=False,
         )
 
+    def _extract_requested_text(self, goal: str) -> str:
+        quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal, flags=re.DOTALL) if item.strip()]
+        if quoted:
+            return quoted[0]
+
+        clauses = [part.strip() for part in re.split(r"[、,。．\n]+", goal) if part.strip()]
+        search_spaces = []
+        if clauses:
+            search_spaces.append(clauses[-1])
+        search_spaces.append(goal)
+        patterns = (
+            r"(?:次の文章|次の文|以下の文章|以下の文|次のテキスト|以下のテキスト)\s*[:：]\s*(.+)$",
+            r"(?:次を入力|以下を入力|次を書いて|以下を書いて|次を貼り付けて|以下を貼り付けて)\s*[:：]\s*(.+)$",
+            r"(.+?)\s*と(?:入力|記入|書いて|書く|貼り付けて)",
+        )
+        for source in search_spaces:
+            for pattern in patterns:
+                match = re.search(pattern, source, flags=re.IGNORECASE | re.DOTALL)
+                if not match:
+                    continue
+                candidate = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n\"“”「」『』")
+                if candidate and len(candidate) <= 5000:
+                    return candidate
+        return ""
+    def _looks_like_text_authoring_goal(self, goal: str, context: RetrievedContext | None) -> bool:
+        normalized = goal.casefold()
+        terms = (
+            "write",
+            "writing",
+            "type",
+            "text",
+            "sentence",
+            "paragraph",
+            "notepad",
+            "メモ帳",
+            "文章",
+            "テキスト",
+            "入力",
+            "書いて",
+            "書く",
+        )
+        if any(term.casefold() in normalized for term in terms):
+            return True
+        return bool(context and "notepad" in getattr(context, "app_candidates", []))
+
+    def _editor_window_visible(self, observation: Observation) -> bool:
+        active_window = observation.active_window
+        if active_window is None:
+            return False
+        evidence = " ".join(
+            [
+                active_window.title,
+                active_window.class_name,
+                observation.focused_element,
+                observation.ui_tree_summary,
+                *observation.textual_hints[:8],
+            ]
+        ).casefold()
+        for term in ("notepad", "メモ帳", "edit", "editor", "document", "text"):
+            if term.casefold() in evidence:
+                return True
+        return False
+
     def _parse_plan(self, response_text: str) -> PlanStep:
         payload = self._extract_json(response_text)
         if bool(payload.get("is_complete")):
@@ -346,6 +422,8 @@ class LiveActionPlanner:
                 control_type=str(target_payload.get("control_type", "")),
                 bounds=bounds,
                 fallback_visual_hint=str(target_payload.get("fallback_visual_hint", "")),
+                search_terms=[str(item).strip() for item in target_payload.get("search_terms", []) if str(item).strip()][:4],
+                backend_hint=str(target_payload.get("backend_hint", "")),
             ),
             purpose=str(action_payload.get("purpose", "")),
             reason=str(action_payload.get("reason", "")),
@@ -480,8 +558,18 @@ class LiveActionPlanner:
                                     "required": ["left", "top", "width", "height"],
                                 },
                                 "fallback_visual_hint": {"type": "string"},
+                                "search_terms": {"type": "array", "items": {"type": "string"}},
+                                "backend_hint": {"type": "string"},
                             },
-                            "required": ["window_title", "automation_id", "name", "control_type", "fallback_visual_hint"],
+                            "required": [
+                                "window_title",
+                                "automation_id",
+                                "name",
+                                "control_type",
+                                "fallback_visual_hint",
+                                "search_terms",
+                                "backend_hint",
+                            ],
                         },
                         "purpose": {"type": "string"},
                         "reason": {"type": "string"},

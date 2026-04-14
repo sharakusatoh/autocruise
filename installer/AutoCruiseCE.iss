@@ -2,7 +2,7 @@
 #define MyAppPublisher "Sharaku Satoh"
 #define MyAppExeName "AutoCruiseCE.exe"
 #ifndef AppVersion
-  #define AppVersion "1.0.2"
+#define AppVersion "1.0.3"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\release\AutoCruiseCE"

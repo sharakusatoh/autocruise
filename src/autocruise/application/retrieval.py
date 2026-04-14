@@ -22,6 +22,7 @@ APP_KEYWORDS: dict[str, list[str]] = {
     "illustrator": ["illustrator", "ai file", "vector", "artboard", "export asset", "svg", "イラストレーター", "ベクター", "アートボード", "ロゴ"],
     "vscode": ["vscode", "visual studio code", "editor", "source code", "log", "debug", "git diff", "コード", "ログ", "デバッグ"],
     "terminal": ["terminal", "powershell", "cmd", "console", "shell", "build", "test", "ターミナル", "powershell", "コマンド", "ビルド"],
+    "notepad": ["notepad", "メモ帳", "text editor", "plain text", "note", "write text", "write sentence"],
     "codex_desktop": ["codex", "codex desktop", "workspace", "thread"],
     "claude_code_desktop": ["claude", "claude code", "conversation", "composer"],
     "windows_settings": ["settings", "windows setting", "system setting", "control panel", "設定", "windows 設定", "コントロールパネル"],
@@ -61,6 +62,7 @@ TASK_KEYWORDS: dict[str, list[str]] = {
     "vscode_search_replace_review": ["vscode", "search replace", "replace all", "refactor text", "コード置換", "一括置換", "検索置換"],
     "terminal_build_and_diagnostics": ["terminal", "powershell", "cmd", "build", "test", "diagnostic", "logs", "コマンド", "ビルド", "テスト", "診断"],
     "terminal_git_status_and_tests": ["terminal", "git", "status", "tests", "pytest", "build", "git status", "コミット前", "テスト実行"],
+    "notepad_simple_writing": ["notepad", "メモ帳", "write", "writing", "文章", "テキスト", "入力", "sentence", "paragraph"],
 }
 
 PROMPT_FILTER_WORDS = ("safe", "safety", "safest", "approval", "approve", "confirmation", "confirm", "cautious", "risk")

@@ -55,8 +55,15 @@ class AutomationRouter:
         return not elements
 
     def resolve_target(self, target: TargetRef) -> AutomationElementState | None:
-        probes = [target.automation_id, target.name, target.window_title, target.control_type.split(".")[-1]]
-        for adapter in self.adapters:
+        probes = [
+            *[item for item in target.search_terms if item],
+            target.automation_id,
+            target.name,
+            target.window_title,
+            target.control_type.split(".")[-1],
+        ]
+        adapters = self._ordered_adapters(target.backend_hint)
+        for adapter in adapters:
             resolver = getattr(adapter, "resolve_target", None)
             if callable(resolver):
                 try:
@@ -74,6 +81,14 @@ class AutomationRouter:
                     if self._target_matches(target, element):
                         return element
         return None
+
+    def _ordered_adapters(self, backend_hint: str) -> list[AutomationAdapter]:
+        normalized = str(backend_hint or "").strip().lower()
+        if not normalized:
+            return list(self.adapters)
+        preferred = [adapter for adapter in self.adapters if adapter.backend.value == normalized]
+        remainder = [adapter for adapter in self.adapters if adapter.backend.value != normalized]
+        return [*preferred, *remainder]
 
     def _first_elements(self, callback) -> list[AutomationElementState]:
         for adapter in self.adapters:
@@ -115,6 +130,12 @@ class AutomationRouter:
             return True
         if target.name and target.name == element.name:
             return True
+        if target.search_terms:
+            haystack = " ".join(
+                [element.name, element.automation_id, element.class_name, element.control_type, element.role]
+            ).casefold()
+            if any(str(term or "").strip().casefold() in haystack for term in target.search_terms):
+                return True
         if target.window_title and target.window_title and target.window_title in element.name:
             return True
         if target.control_type and target.control_type == element.control_type:

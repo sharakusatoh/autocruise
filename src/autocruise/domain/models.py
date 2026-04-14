@@ -126,6 +126,8 @@ class TargetRef:
     control_type: str = ""
     bounds: Bounds | None = None
     fallback_visual_hint: str = ""
+    search_terms: list[str] = field(default_factory=list)
+    backend_hint: str = ""
 
 
 @dataclass(slots=True)

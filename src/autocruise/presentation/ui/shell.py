@@ -61,6 +61,7 @@ from autocruise.infrastructure.storage import (
     load_structured,
     normalize_max_steps_preference,
     read_text,
+    write_text_file,
 )
 from autocruise.infrastructure.windows.input_executor import InputExecutor
 from autocruise.infrastructure.windows.global_hotkeys import GlobalHotkeyManager, normalize_hotkey
@@ -204,8 +205,8 @@ class FloatingControlWidget(QWidget):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowTitle(f"{APP_TITLE} Controls")
-        self.resize(420, 228)
-        self.setMinimumSize(380, 216)
+        self.resize(452, 244)
+        self.setMinimumSize(408, 228)
         self._full_goal_text = ""
         self._full_activity_text = ""
 
@@ -219,14 +220,15 @@ class FloatingControlWidget(QWidget):
         layout.setSpacing(10)
 
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(10)
         self.logo_label = QLabel()
-        self.logo_label.setPixmap(app_icon(size=32).pixmap(20, 20))
-        self.logo_label.setFixedSize(20, 20)
+        self.logo_label.setStyleSheet("background: transparent;")
+        self.logo_label.setPixmap(app_icon(size=48).pixmap(28, 28))
+        self.logo_label.setFixedSize(28, 28)
         self.logo_label.setScaledContents(True)
         header.addWidget(self.logo_label, 0, Qt.AlignVCenter)
         self.title_label = QLabel(APP_TITLE)
-        self.title_label.setProperty("role", "section")
+        self.title_label.setStyleSheet(f"color: {COLORS.text_primary}; font-size: 24px; font-weight: 700; background: transparent;")
         header.addWidget(self.title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
         self.status_badge = StatusBadge(tr("status.ready"), "ready")
@@ -406,11 +408,11 @@ class MainWindow(QMainWindow):
 
     def _load_preferences(self) -> dict:
         merged = normalize_preferences(load_structured(self.paths.preferences_path()))
-        self.paths.preferences_path().write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_text_file(self.paths.preferences_path(), json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
         return merged
 
     def _save_preferences(self) -> None:
-        self.paths.preferences_path().write_text(json.dumps(self.preferences, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_text_file(self.paths.preferences_path(), json.dumps(self.preferences, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load_app_icon(self) -> QIcon:
         if self.logo_path.exists():
@@ -429,7 +431,7 @@ class MainWindow(QMainWindow):
     def _ensure_floating_controls(self) -> FloatingControlWidget:
         if self.floating_controls is None:
             controls = FloatingControlWidget()
-            controls.set_logo_pixmap(self._load_brand_pixmap(20))
+            controls.set_logo_pixmap(self._load_brand_pixmap(28))
             controls.open_requested.connect(self._show_main_window)
             controls.pause_requested.connect(self._toggle_pause)
             controls.stop_requested.connect(self._stop_session)
@@ -1870,11 +1872,10 @@ class MainWindow(QMainWindow):
         if self.preferences.get("selected_system_prompt", "") == normalized:
             return
         self.preferences["selected_system_prompt"] = normalized
-        self._save_preferences()
 
     def _new_system_prompt(self) -> None:
         path = self.paths.systemprompt_dir / f"systemprompt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        path.write_text("# System Prompt\n\nDescribe the execution style for this profile.\n", encoding="utf-8")
+        write_text_file(path, "# System Prompt\n\nDescribe the execution style for this profile.\n", encoding="utf-8")
         self.preferences["selected_system_prompt"] = path.name
         self._save_preferences()
         self._refresh_settings()
@@ -1889,7 +1890,7 @@ class MainWindow(QMainWindow):
         if path.parent != self.paths.systemprompt_dir:
             save_path = self.paths.systemprompt_dir / path.name
             if not save_path.exists():
-                save_path.write_text(read_text(path), encoding="utf-8")
+                write_text_file(save_path, read_text(path), encoding="utf-8")
             self.preferences["selected_system_prompt"] = save_path.name
             self._save_preferences()
             self._refresh_settings()
@@ -1966,7 +1967,7 @@ class MainWindow(QMainWindow):
 
             def save_current_text() -> None:
                 try:
-                    save_path.write_text(viewer.toPlainText(), encoding="utf-8")
+                    write_text_file(save_path, viewer.toPlainText(), encoding="utf-8")
                     self._refresh_knowledge()
                     if save_path.parent == self.paths.systemprompt_dir:
                         self.preferences["selected_system_prompt"] = save_path.name
@@ -2000,10 +2001,19 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.quit()
 
+    def _wait_for_worker_shutdown(self, timeout_seconds: float = 3.0) -> None:
+        worker = self.worker
+        if worker is None:
+            return
+        worker.join(timeout=max(timeout_seconds, 0.0))
+        if not worker.is_alive():
+            self.worker = None
+
     def _shutdown_runtime(self) -> None:
         if self._is_session_active():
             self.orchestrator.stop()
             self.codex_app_server.cancel_active_turn()
+            self._wait_for_worker_shutdown()
         self._hide_floating_controls()
         self.hotkey_manager.close()
         app = QApplication.instance()

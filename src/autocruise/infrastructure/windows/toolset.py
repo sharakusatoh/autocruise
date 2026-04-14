@@ -240,6 +240,9 @@ class WindowsAgentToolset:
         context=None,
     ) -> PlanStep:
         retrieved_context, planning_meta = self._normalize_context(context)
+        completed_editor_step = self._complete_editor_goal_if_ready(goal, observation, recent_actions, retrieved_context)
+        if completed_editor_step is not None:
+            return completed_editor_step
         launch_step = self._plan_direct_app_launch(goal, observation, recent_actions, retrieved_context, planning_meta)
         if launch_step is not None:
             return self._with_wait_defaults(launch_step)
@@ -247,6 +250,7 @@ class WindowsAgentToolset:
         if self.live_planner is not None and not skip_live_replan:
             live_plan = self.live_planner.plan(goal, observation, recent_actions, context)
             if live_plan is not None:
+                live_plan = self._override_editor_wait(goal, observation, recent_actions, retrieved_context, live_plan)
                 return self._with_wait_defaults(live_plan)
 
         preferred_window = self._pick_window(goal, observation.visible_windows, retrieved_context)
@@ -257,6 +261,7 @@ class WindowsAgentToolset:
 
         quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal) if item.strip()]
         editable_target = self._pick_edit_target(observation.detected_elements)
+        quoted = []
         if quoted and editable_target and not self._recently_repeated(
             recent_actions,
             ActionType.TYPE_TEXT,
@@ -283,6 +288,16 @@ class WindowsAgentToolset:
                 ),
                 reasoning="Quoted text plus a visible edit field is a direct text input fallback.",
             )
+
+        editor_step = self._plan_editor_text_entry(
+            goal,
+            observation,
+            recent_actions,
+            retrieved_context,
+            self._extract_requested_text(goal),
+        )
+        if editor_step is not None:
+            return self._with_wait_defaults(editor_step)
 
         normalized = goal.lower()
         direct_matches: list[tuple[int, Any]] = []
@@ -992,6 +1007,239 @@ class WindowsAgentToolset:
         matches.sort(reverse=True)
         return [app_name for _, _, app_name in matches]
 
+    def _extract_requested_text(self, goal: str) -> str:
+        quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal, flags=re.DOTALL) if item.strip()]
+        if quoted:
+            return quoted[0]
+
+        clauses = [part.strip() for part in re.split(r"[、,。．\n]+", goal) if part.strip()]
+        search_spaces = []
+        if clauses:
+            search_spaces.append(clauses[-1])
+        search_spaces.append(goal)
+        patterns = (
+            r"(?:次の文章|次の文|以下の文章|以下の文|次のテキスト|以下のテキスト)\s*[:：]\s*(.+)$",
+            r"(?:次を入力|以下を入力|次を書いて|以下を書いて|次を貼り付けて|以下を貼り付けて)\s*[:：]\s*(.+)$",
+            r"(.+?)\s*と(?:入力|記入|書いて|書く|貼り付けて)",
+        )
+        for source in search_spaces:
+            for pattern in patterns:
+                match = re.search(pattern, source, flags=re.IGNORECASE | re.DOTALL)
+                if not match:
+                    continue
+                candidate = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n\"“”「」『』")
+                if candidate and len(candidate) <= 5000:
+                    return candidate
+        return ""
+    def _synthesize_editor_text_draft(self, goal: str, retrieved_context, requested_text: str) -> str:
+        if requested_text:
+            return requested_text
+        if not self._looks_like_editor_goal(goal, retrieved_context):
+            return ""
+        normalized_goal = self._normalize_text(goal)
+        if any(token in normalized_goal for token in ("自己紹介", "introduceyourself", "selfintroduction", "introducemyself")):
+            return "こんにちは。私はAutoCruise CEです。Windows上の操作を支援するデスクトップオペレーターです。よろしくお願いします。"
+        if any(token in normalized_goal for token in ("挨拶", "greeting", "あいさつ")):
+            return "こんにちは。よろしくお願いします。"
+        if any(token in normalized_goal for token in ("簡単な文章", "短文", "shortnote", "shorttext", "メモ", "note")):
+            return "こんにちは。これは簡単なメモです。"
+        if any(token in normalized_goal for token in ("文章", "テキスト", "write", "writing", "type", "paragraph", "sentence")):
+            return "こんにちは。AutoCruise CEが文章入力を行っています。"
+        return ""
+
+    def _looks_like_editor_goal(self, goal: str, retrieved_context) -> bool:
+        if self._requested_launch_app(goal, retrieved_context) == "notepad":
+            return True
+        normalized_goal = self._normalize_text(goal)
+        editor_terms = (
+            "メモ帳",
+            "notepad",
+            "write",
+            "writing",
+            "type",
+            "text",
+            "sentence",
+            "paragraph",
+            "文章",
+            "テキスト",
+            "入力",
+            "書いて",
+            "書く",
+        )
+        return any(self._normalize_text(term) in normalized_goal for term in editor_terms)
+
+    def _looks_like_editor_window(self, observation: Observation) -> bool:
+        active_window = observation.active_window
+        if active_window is None:
+            return False
+        evidence = " ".join(
+            [
+                active_window.title,
+                active_window.class_name,
+                observation.focused_element,
+                observation.ui_tree_summary,
+                *observation.textual_hints[:8],
+            ]
+        )
+        normalized = self._normalize_text(evidence)
+        editor_terms = ("notepad", "メモ帳", "edit", "editor", "document", "text")
+        if any(self._normalize_text(term) in normalized for term in editor_terms):
+            return True
+        return any(self._is_edit_element(element.control_type) for element in observation.detected_elements)
+
+    def _build_editor_type_step(self, observation: Observation, text: str) -> PlanStep | None:
+        active_window = observation.active_window
+        if active_window is None:
+            return None
+        edit_target = self._pick_edit_target(observation.detected_elements)
+        target = TargetRef(
+            window_title=active_window.title,
+            name=edit_target.name if edit_target else active_window.title,
+            automation_id=edit_target.automation_id if edit_target else "",
+            control_type=edit_target.control_type if edit_target else "ControlType.Document",
+            bounds=edit_target.bounds if edit_target else active_window.bounds,
+            fallback_visual_hint="editor:window",
+        )
+        return PlanStep(
+            summary="Type the requested text into the active editor.",
+            action=Action(
+                type=ActionType.TYPE_TEXT,
+                target=target,
+                purpose="Enter the requested text into the active editor.",
+                reason="The requested editor window is already open and ready for input.",
+                preconditions=["An editor window is active."],
+                expected_outcome="The editor content updates with the requested text.",
+                confidence=max(0.72, edit_target.confidence if edit_target else 0.72),
+                text=text,
+            ),
+            reasoning="Editor tasks should advance with text input instead of waiting.",
+        )
+
+    def _build_editor_click_step(self, observation: Observation) -> PlanStep | None:
+        active_window = observation.active_window
+        if active_window is None or active_window.bounds is None:
+            return None
+        edit_target = self._pick_edit_target(observation.detected_elements)
+        target = TargetRef(
+            window_title=active_window.title,
+            name=edit_target.name if edit_target else active_window.title,
+            automation_id=edit_target.automation_id if edit_target else "",
+            control_type=edit_target.control_type if edit_target else "ControlType.Document",
+            bounds=edit_target.bounds if edit_target else active_window.bounds,
+            fallback_visual_hint="editor:window",
+        )
+        return PlanStep(
+            summary="Place the caret inside the active editor.",
+            action=Action(
+                type=ActionType.CLICK,
+                target=target,
+                purpose="Place the caret in the active editor.",
+                reason="Typing should start only after the editor surface is active.",
+                preconditions=["The editor window is visible."],
+                expected_outcome="The text caret is active in the editor surface.",
+                confidence=max(0.7, edit_target.confidence if edit_target else 0.7),
+            ),
+            reasoning="A direct click into the editor is better than waiting.",
+        )
+
+    def _plan_editor_text_entry(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        retrieved_context,
+        requested_text: str,
+    ) -> PlanStep | None:
+        if not self._looks_like_editor_goal(goal, retrieved_context):
+            return None
+        if not self._looks_like_editor_window(observation):
+            return None
+
+        active_title = observation.active_window.title if observation.active_window else ""
+        draft_text = self._synthesize_editor_text_draft(goal, retrieved_context, requested_text)
+        if draft_text:
+            if self._editor_text_recently_completed(observation, recent_actions, active_title, draft_text):
+                return PlanStep(
+                    summary="The requested text has already been entered.",
+                    is_complete=True,
+                    completion_reason="The editor already contains the most recent requested text entry.",
+                    reasoning="A successful text entry was already sent to the active editor, so repeating it would not make progress.",
+                )
+            if self._recently_repeated(recent_actions, ActionType.TYPE_TEXT, active_title, draft_text):
+                return None
+            return self._build_editor_type_step(observation, draft_text)
+
+        if not self._is_edit_focus(observation.focused_element):
+            if not self._recently_repeated(recent_actions, ActionType.CLICK, active_title):
+                return self._build_editor_click_step(observation)
+        return None
+
+    def _override_editor_wait(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        retrieved_context,
+        live_plan: PlanStep,
+    ) -> PlanStep:
+        if live_plan.action is None or live_plan.action.type != ActionType.WAIT:
+            return live_plan
+        editor_step = self._plan_editor_text_entry(
+            goal,
+            observation,
+            recent_actions,
+            retrieved_context,
+            self._extract_requested_text(goal),
+        )
+        return editor_step or live_plan
+
+    def _complete_editor_goal_if_ready(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        retrieved_context,
+    ) -> PlanStep | None:
+        if not recent_actions:
+            return None
+        if not self._looks_like_editor_goal(goal, retrieved_context):
+            return None
+        if not self._looks_like_editor_window(observation):
+            return None
+        requested_text = self._extract_requested_text(goal)
+        draft_text = self._synthesize_editor_text_draft(goal, retrieved_context, requested_text)
+        active_title = observation.active_window.title if observation.active_window else ""
+        if not draft_text:
+            return None
+        if not self._editor_text_recently_completed(observation, recent_actions, active_title, draft_text):
+            return None
+        return PlanStep(
+            summary="The requested writing task is complete.",
+            is_complete=True,
+            completion_reason="The requested text was entered into the active editor.",
+            reasoning="The latest successful action already wrote the goal-aligned text, so the next best action is to stop.",
+        )
+
+    def _editor_text_recently_completed(
+        self,
+        observation: Observation,
+        recent_actions: list[Action],
+        active_title: str,
+        text: str,
+    ) -> bool:
+        if not recent_actions or not text:
+            return False
+        last_action = recent_actions[-1]
+        if last_action.type != ActionType.TYPE_TEXT:
+            return False
+        last_target = last_action.target.name or last_action.target.window_title
+        if active_title and last_target and last_target != active_title and last_action.target.window_title != active_title:
+            return False
+        if last_action.text != text:
+            return False
+        last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
+        return bool(last_execution.get("success"))
+
     def _observation_has_app(self, observation: Observation, app_key: str) -> bool:
         terms = APP_LAUNCH_SPECS.get(app_key, {}).get("terms", ())
         return self._observation_contains_terms(observation, terms)
@@ -1037,6 +1285,13 @@ class WindowsAgentToolset:
             if action.target.name and action.target.name == element.name:
                 self._sync_target_from_element(action, element)
                 return VerificationResult(True, 0.78, "Matching element name found")
+            if action.target.search_terms:
+                haystack = self._normalize_text(
+                    f"{element.name} {element.automation_id} {element.control_type}"
+                )
+                if any(self._normalize_text(term) in haystack for term in action.target.search_terms if term):
+                    self._sync_target_from_element(action, element)
+                    return VerificationResult(True, 0.72, "Matching target search terms found")
             if (
                 action.target.bounds is not None
                 and element.bounds is not None
@@ -1263,7 +1518,12 @@ class WindowsAgentToolset:
         if (
             isinstance(last_execution, dict)
             and bool(last_execution.get("success", False))
-            and (self._is_edit_focus(observation.focused_element) or self._is_edit_element(action.target.control_type))
+            and (
+                self._is_edit_focus(observation.focused_element)
+                or self._is_edit_element(action.target.control_type)
+                or self._looks_like_editor_window(observation)
+                or (action.target.fallback_visual_hint or "").strip().lower().startswith("editor:")
+            )
         ):
             return ValidationResult(True, 0.58, action.expected_outcome or "Text input was sent to the focused editor.")
 

@@ -65,6 +65,31 @@ def read_text(path: Path) -> str:
         return ""
 
 
+def write_text_file(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    retries: int = 6,
+    retry_delay_seconds: float = 0.05,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    last_error: OSError | None = None
+    for attempt in range(max(1, retries)):
+        try:
+            temp_path.write_text(text, encoding=encoding)
+            os.replace(temp_path, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            temp_path.unlink(missing_ok=True)
+            if attempt + 1 < max(1, retries):
+                time.sleep(retry_delay_seconds * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
 def load_structured(path: Path) -> dict[str, Any]:
     text = read_text(path).strip()
     if not text:
@@ -182,7 +207,8 @@ class WorkspacePaths:
         self._seed_user_markdown_directory("custom_prompts")
         (self.users_dir / "default" / "scheduled_jobs.json").touch(exist_ok=True)
         if not any(self.iter_systemprompt_names()):
-            (self.systemprompt_dir / "default.md").write_text(
+            write_text_file(
+                self.systemprompt_dir / "default.md",
                 "# Default System Prompt\n\nFocus on practical progress and concise planning.\n",
                 encoding="utf-8",
             )
@@ -260,7 +286,7 @@ class WorkspacePaths:
             if not self._should_refresh_default_user_file(name, target, source):
                 return
         if source.exists():
-            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            write_text_file(target, source.read_text(encoding="utf-8"), encoding="utf-8")
         else:
             target.touch(exist_ok=True)
 
@@ -276,7 +302,7 @@ class WorkspacePaths:
             target = target_dir / source.name
             if target.exists() and target.stat().st_size > 0:
                 continue
-            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            write_text_file(target, source.read_text(encoding="utf-8"), encoding="utf-8")
 
     def _should_refresh_default_user_file(self, name: str, target: Path, source: Path) -> bool:
         if name != "user_custom_prompt.md" or not source.exists():

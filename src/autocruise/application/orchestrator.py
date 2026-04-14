@@ -83,6 +83,7 @@ class SessionOrchestrator:
         self.toolset_factory = toolset_factory
         self._pause_requested = False
         self._stop_requested = False
+        self._active_toolset: AgentToolset | None = None
 
     def pause(self) -> None:
         self._pause_requested = True
@@ -92,6 +93,12 @@ class SessionOrchestrator:
 
     def stop(self) -> None:
         self._stop_requested = True
+        toolset = self._active_toolset
+        if toolset is not None:
+            try:
+                toolset.abort_session("User requested stop")
+            except Exception:  # noqa: BLE001
+                pass
 
     def run(self, instruction: str, task_id: str = "", trigger: str = "manual") -> SessionSnapshot:
         self._pause_requested = False
@@ -116,6 +123,7 @@ class SessionOrchestrator:
                 ),
             )
             toolset = self.toolset_factory()
+            self._active_toolset = toolset
             snapshot = self._transition(
                 snapshot,
                 SessionState.LOADING_CONTEXT,
@@ -165,6 +173,9 @@ class SessionOrchestrator:
                     )
                     snapshot.current_observation = observation
                     self._emit("observation", {"observation": observation})
+                    stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                    if stopped is not None:
+                        return stopped
 
                 snapshot = self._transition(
                     snapshot,
@@ -206,6 +217,9 @@ class SessionOrchestrator:
                 action = plan.action
                 snapshot.last_action = action
                 snapshot.summary = plan.summary
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                if stopped is not None:
+                    return stopped
 
                 snapshot = self._maybe_pause(snapshot, SessionState.PRECHECK)
                 snapshot = self._transition(
@@ -243,6 +257,9 @@ class SessionOrchestrator:
                         confirmation_notes,
                         learning_updates,
                     )
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                if stopped is not None:
+                    return stopped
 
                 snapshot = self._maybe_pause(snapshot, SessionState.EXECUTING)
                 snapshot = self._transition(
@@ -275,6 +292,9 @@ class SessionOrchestrator:
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
                     continue
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                if stopped is not None:
+                    return stopped
 
                 snapshot = self._transition(
                     snapshot,
@@ -329,6 +349,9 @@ class SessionOrchestrator:
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
                     continue
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                if stopped is not None:
+                    return stopped
 
                 recent_actions.append(action)
                 step_count += 1
@@ -375,6 +398,8 @@ class SessionOrchestrator:
             return self._finalize_history(self._fail(snapshot, str(exc)), 0, [], 0)
         except Exception as exc:  # noqa: BLE001
             return self._finalize_history(self._fail(snapshot, str(exc)), 0, [], 0)
+        finally:
+            self._active_toolset = None
 
     def _transition(self, snapshot: SessionSnapshot, new_state: SessionState, payload, reason: str) -> SessionSnapshot:
         snapshot = self.state_machine.transition(snapshot, new_state, payload, reason)
@@ -454,6 +479,22 @@ class SessionOrchestrator:
         if self._stop_requested:
             return paused
         return self._transition(paused, resume_target, self._resume_payload(resume_target, snapshot.summary), "Resume execution")
+
+    def _stop_if_requested(
+        self,
+        snapshot: SessionSnapshot,
+        step_count: int,
+        confirmation_notes: list[str],
+        learning_updates: int,
+    ) -> SessionSnapshot | None:
+        if not self._stop_requested:
+            return None
+        return self._finalize_history(
+            self._stop(snapshot, "User requested stop"),
+            step_count,
+            confirmation_notes,
+            learning_updates,
+        )
 
     def _resume_payload(self, resume_target: SessionState, summary: str):
         if resume_target == SessionState.OBSERVING:

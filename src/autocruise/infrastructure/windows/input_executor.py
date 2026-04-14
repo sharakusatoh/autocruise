@@ -190,12 +190,12 @@ class InputExecutor:
             if action.type == ActionType.TYPE_TEXT:
                 self._focus_target_window(action)
                 if self._should_click_before_typing(action):
-                    point = self._target_center(action.target.bounds)
+                    point = self._typing_anchor_point(action)
                     if point is not None:
                         user32.SetCursorPos(*point)
                         self._mouse_click(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
-                        time.sleep(0.06)
-                ok, detail = self._send_text(action.text)
+                        time.sleep(0.12)
+                ok, detail = self._send_text(action.text, prefer_paste=self._should_prefer_paste(action))
                 return ok, detail
 
             return False, f"Unsupported action type: {action.type.value}"
@@ -213,6 +213,12 @@ class InputExecutor:
         user32.mouse_event(up_flag, 0, 0, 0, 0)
 
     def _focus_target_window(self, action: Action) -> None:
+        window = self._find_target_window(action)
+        if window is not None:
+            self.window_manager.focus_window(window.window_id)
+            time.sleep(0.08)
+
+    def _find_target_window(self, action: Action):
         candidates: list[str] = []
         for value in (action.target.window_title, action.target.name):
             text = str(value or "").strip()
@@ -226,14 +232,13 @@ class InputExecutor:
         for title in candidates:
             window = self.window_manager.find_window(title)
             if window is not None:
-                self.window_manager.focus_window(window.window_id)
-                time.sleep(0.05)
-                return
+                return window
+        return None
 
-    def _send_text(self, text: str) -> tuple[bool, str]:
+    def _send_text(self, text: str, *, prefer_paste: bool = False) -> tuple[bool, str]:
         if not text:
             return True, "Typed text"
-        if self._should_paste_text(text):
+        if prefer_paste or self._should_paste_text(text):
             return self._paste_text(text)
         for char in text:
             if not self._send_virtual_key_char(char):
@@ -244,6 +249,19 @@ class InputExecutor:
     def _should_paste_text(self, text: str) -> bool:
         normalized = str(text or "")
         return any(ord(char) > 127 for char in normalized) or "\n" in normalized or "\r" in normalized or "\t" in normalized
+
+    def _should_prefer_paste(self, action: Action) -> bool:
+        if self._should_paste_text(action.text):
+            return True
+        combined = " ".join(
+            [
+                str(action.target.window_title or ""),
+                str(action.target.name or ""),
+                str(action.target.control_type or ""),
+                str(action.target.fallback_visual_hint or ""),
+            ]
+        ).lower()
+        return any(token in combined for token in ("notepad", "メモ帳", "document", "editor", "text editor"))
 
     def _paste_text(self, text: str) -> tuple[bool, str]:
         previous_text = self._read_clipboard_text()
@@ -392,7 +410,7 @@ class InputExecutor:
 
     def _should_click_before_typing(self, action: Action) -> bool:
         bounds = action.target.bounds
-        if bounds is None:
+        if bounds is None and self._find_target_window(action) is None:
             return False
         if self._looks_like_taskbar_search_target(action):
             return False
@@ -400,6 +418,24 @@ class InputExecutor:
         if any(hint in control_type for hint in EDIT_CONTROL_HINTS):
             return True
         return True
+
+    def _typing_anchor_point(self, action: Action) -> tuple[int, int] | None:
+        window = self._find_target_window(action)
+        if window is not None:
+            editable_child = self.window_manager.find_editable_child(window.window_id)
+            point = self._target_center(editable_child.bounds if editable_child is not None else None)
+            if point is not None:
+                return point
+        point = self._target_center(action.target.bounds)
+        if point is not None:
+            return point
+        if window is None or window.bounds is None:
+            return None
+        bounds = window.bounds
+        return (
+            bounds.left + bounds.width // 2,
+            bounds.top + int(bounds.height * 0.58),
+        )
 
     def _looks_like_taskbar_search_target(self, action: Action) -> bool:
         bounds = action.target.bounds
