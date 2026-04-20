@@ -39,7 +39,7 @@ Playwright and browser binaries are optional and are not bundled in the standard
 - `application/state_machine.py`
 - `application/retrieval.py`
 - `application/live_planner.py`
-- Session lifecycle, retrieval, planning, execution loop, validation, recovery, and learning updates.
+- Session lifecycle, prompt retrieval, planning, execution loop, validation, and recovery.
 
 ### Domain Layer
 
@@ -68,7 +68,6 @@ Explicit states:
 - `EXECUTING`
 - `POSTCHECK`
 - `REPLANNING`
-- `LEARNING_UPDATE`
 - `PAUSED`
 - `STOPPED`
 - `FAILED`
@@ -84,7 +83,7 @@ Rules:
 ## Execution Loop
 
 1. Interpret the user goal.
-2. Select relevant constitution, app profile, task recipe, memory, and user prompt files.
+2. Select the constitution, selected system prompt, and custom instruction files.
 3. Capture a screenshot and visible window state.
 4. Query UIA for root, focused element, active-window descendants, and target candidates.
 5. Add optional Playwright/CDP state when a connected browser page is available.
@@ -95,7 +94,6 @@ Rules:
 10. Execute one action through the best available backend.
 11. Re-observe in `POSTCHECK`.
 12. Validate visible progress, replan, complete, or stop with an issue record.
-13. Append learning entries when a repeatable pattern was discovered.
 
 ## Automation Interface
 
@@ -138,25 +136,22 @@ The browser adapter is locator-first:
 
 If locator operations fail and CDP is available, the adapter can use CDP `DOM`, `Accessibility`, and `Input` domains for targeted fallback operations. If no browser page is connected, the adapter reports unavailable and the desktop loop continues through UIA / Win32 / vision.
 
-## Memory Model
+## Prompt Context Model
 
 Priority order:
 
 1. Constitution
 2. Session mission
-3. App profile
-4. Task recipe
-5. User custom prompt
-6. App memory and task memory
-7. Runtime observation
-8. Recent execution context
+3. Selected system prompt
+4. User custom prompt and custom prompt files
+5. Runtime observation
+6. Recent execution context
 
-Dynamic memories are append-only JSONL files. Existing entries are not silently overwritten. New evidence creates new entries or superseding evidence records.
+No other bundled prompt-source categories are loaded into the model context in this edition.
 
 ## Logging and Storage
 
 - `logs/execution_log.jsonl`: step-level execution records
-- `logs/learning_log.jsonl`: memory updates
 - `logs/audit_log.jsonl`: state transitions, retrieval decisions, automation diagnostics, and issue records
 - `screenshots/session_{id}/`: screenshot capture per session
 
@@ -184,6 +179,6 @@ The settings screen includes:
 
 ## Distribution
 
-`build_windows.bat` produces the PyInstaller folder, portable ZIP, and installer when Inno Setup is installed. The package includes the UIA PowerShell scripts, docs, prompt library, default app/task knowledge, icon assets, and default user configuration.
+`build_windows.bat` produces the PyInstaller folder, portable ZIP, and installer when Inno Setup is installed. The package includes the UIA PowerShell scripts, docs, prompt assets, icon assets, and default user configuration.
 
 Before release, run the checks in `docs/release_qa_checklist.md`.

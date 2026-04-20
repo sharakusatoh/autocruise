@@ -19,7 +19,6 @@ class SessionState(str, Enum):
     EXECUTING = "EXECUTING"
     POSTCHECK = "POSTCHECK"
     REPLANNING = "REPLANNING"
-    LEARNING_UPDATE = "LEARNING_UPDATE"
     PAUSED = "PAUSED"
     STOPPED = "STOPPED"
     FAILED = "FAILED"
@@ -239,25 +238,6 @@ class ExecutionResult:
 
 
 @dataclass(slots=True)
-class LearningEntry:
-    id: str
-    app: str
-    scope: str
-    observation_pattern: str
-    successful_action: str
-    expected_outcome: str
-    confidence: float
-    evidence_count: int
-    failure_count: int
-    first_seen_at: str
-    last_verified_at: str
-    invalidation_hint: str
-    source_session_id: str
-    task_id: str = ""
-    stage: str = ""
-
-
-@dataclass(slots=True)
 class KnowledgeSelection:
     kind: str
     path: str
@@ -327,11 +307,6 @@ class ReplanningData:
 
 
 @dataclass(slots=True)
-class LearningUpdateData:
-    entries: int
-
-
-@dataclass(slots=True)
 class PausedData:
     resume_target: SessionState
 
@@ -360,7 +335,6 @@ StatePayload = (
     | ExecutingData
     | PostcheckData
     | ReplanningData
-    | LearningUpdateData
     | PausedData
     | StoppedData
     | FailedData

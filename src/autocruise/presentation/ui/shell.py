@@ -119,7 +119,7 @@ DEFAULT_PREFERENCES = {
     "history_display_limit": 120,
     "pause_hotkey": "F8",
     "stop_hotkey": "F12",
-    "selected_system_prompt": "",
+    "selected_system_prompt": "AutoCruise.md",
     "show_onboarding_on_start": False,
     "onboarding_completed": True,
 }
@@ -228,7 +228,7 @@ class FloatingControlWidget(QWidget):
         self.logo_label.setScaledContents(True)
         header.addWidget(self.logo_label, 0, Qt.AlignVCenter)
         self.title_label = QLabel(APP_TITLE)
-        self.title_label.setStyleSheet(f"color: {COLORS.text_primary}; font-size: 21px; font-weight: 700; background: transparent;")
+        self.title_label.setStyleSheet(f"color: {COLORS.text_primary}; font-size: 21px; font-weight: 300; background: transparent;")
         header.addWidget(self.title_label, 0, Qt.AlignVCenter)
         header.addStretch(1)
         self.status_badge = StatusBadge(tr("status.ready"), "ready")
@@ -571,7 +571,6 @@ class MainWindow(QMainWindow):
         self.knowledge_page.detail_requested.connect(self._open_knowledge_detail)
         self.knowledge_page.create_requested.connect(self._create_knowledge_item)
         self.knowledge_page.list_panel.selected_payload.connect(self._show_knowledge_payload)
-        self.knowledge_page.category_group.buttonClicked.connect(lambda _button: self._refresh_knowledge())
         self.schedules_page.new_requested.connect(self._new_schedule)
         self.schedules_page.save_requested.connect(self._save_schedule)
         self.schedules_page.enable_requested.connect(self._enable_schedule)
@@ -926,10 +925,8 @@ class MainWindow(QMainWindow):
                 "message": message,
                 "failure_reason": message,
                 "important_confirmations": [],
-                "used_knowledge": [],
+                "used_context": [],
                 "saved_captures": [],
-                "learning_updated": False,
-                "learning_update_count": 0,
                 "flow": ["scheduled"],
             },
         )
@@ -1077,7 +1074,6 @@ class MainWindow(QMainWindow):
                 "message.phase_executing",
                 "message.phase_postcheck",
                 "message.phase_replanning",
-                "message.phase_learning",
                 "message.phase_paused",
                 "message.phase_stopped",
                 "message.phase_failed",
@@ -1142,7 +1138,6 @@ class MainWindow(QMainWindow):
             SessionState.POSTCHECK,
             SessionState.REPLANNING,
             SessionState.LOADING_CONTEXT,
-            SessionState.LEARNING_UPDATE,
         }:
             return "running"
         return "ready"
@@ -1483,9 +1478,6 @@ class MainWindow(QMainWindow):
             f"{tr('label.instruction')}: {history.get('instruction', '')}",
             f"{tr('label.result')}: {result_text}",
             f"{tr('label.steps')}: {history.get('step_count', 0)}",
-            f"{tr('history.learning_updated')}: "
-            f"{tr('history.learning_yes') if history.get('learning_updated') else tr('history.learning_no')}",
-            "",
             f"{tr('history.flow')}:",
         ]
         flow = history.get("flow") or []
@@ -1498,10 +1490,11 @@ class MainWindow(QMainWindow):
                 f"{tr('history.failure_reason')}: "
                 f"{sanitize_user_message(history.get('failure_reason', '')) or tr('value.none')}",
                 "",
-                f"{tr('history.used_knowledge')}:",
+                f"{tr('history.used_context')}:",
             ]
         )
-        lines.extend([f"- {Path(item).name}" for item in (history.get("used_knowledge") or [])] or [f"- {tr('value.none')}"])
+        loaded_context = history.get("used_context") or []
+        lines.extend([f"- {Path(item).name}" for item in loaded_context] or [f"- {tr('value.none')}"])
         self.history_page.show_detail(summary, "\n".join(lines), detail["captures"])
 
     def _delete_selected_thread(self) -> None:
@@ -1528,7 +1521,6 @@ class MainWindow(QMainWindow):
         self.selected_history_id = next_session_id
         self._refresh_history(preferred_session_id=next_session_id)
         if deleted:
-            self._refresh_knowledge()
             self._show_notice(tr("message.thread_deleted"), tone="success")
 
     def _open_history_diagnostics(self) -> None:
@@ -1539,7 +1531,6 @@ class MainWindow(QMainWindow):
             "history": detail["history"],
             "audit": detail["audit"],
             "execution": detail["execution"],
-            "learning": detail["learning"],
         }
         self._open_text_dialog(tr("window.diagnostics"), json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -1573,27 +1564,12 @@ class MainWindow(QMainWindow):
             save_path=Path(detail_path) if detail_path else None,
         )
 
-    def _create_knowledge_item(self, category: str) -> None:
+    def _create_knowledge_item(self) -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if category == "app_knowledge":
-            folder = self.paths.apps_dir / f"custom_app_{timestamp}"
-            folder.mkdir(parents=True, exist_ok=True)
-            path = folder / "app_profile.md"
-            title = folder.name
-            body = f"# {title}\n\n## Overview\nDescribe how to operate this app effectively.\n"
-        elif category == "action_templates":
-            folder = self.paths.tasks_dir / f"custom_task_{timestamp}"
-            folder.mkdir(parents=True, exist_ok=True)
-            path = folder / "task_recipe.md"
-            title = folder.name
-            body = f"# {title}\n\n## Goal\nDescribe the repeatable task steps.\n"
-        elif category == "custom_prompt":
-            self.paths.custom_prompt_dir.mkdir(parents=True, exist_ok=True)
-            path = self.paths.custom_prompt_dir / f"custom_prompt_{timestamp}.md"
-            title = path.stem
-            body = f"# {title}\n\nAdd prompt guidance here.\n"
-        else:
-            return
+        self.paths.custom_prompt_dir.mkdir(parents=True, exist_ok=True)
+        path = self.paths.custom_prompt_dir / f"custom_prompt_{timestamp}.md"
+        title = path.stem
+        body = f"# {title}\n\nAdd custom instructions here.\n"
         path.write_text(body, encoding="utf-8")
         self._refresh_knowledge()
         created = next(
@@ -1917,7 +1893,6 @@ class MainWindow(QMainWindow):
         if mode == AdapterMode.MOCK.value:
             return MockAgentToolset(
                 root=self.paths.root,
-                memory_path=self.paths.app_memory_path("excel"),
                 live_planner=live_planner,
             )
         window_manager = WindowManager()
@@ -1926,7 +1901,6 @@ class MainWindow(QMainWindow):
         automation_router = AutomationRouter([uia_adapter, PlaywrightAdapter(browser_sensor.page())])
         return WindowsAgentToolset(
             root=self.paths.root,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=WindowsObservationBuilder(
                 screenshot_provider=ScreenshotProvider(),
                 window_manager=window_manager,

@@ -27,7 +27,6 @@ TEXTS = {
         "status.executing": "Running",
         "status.postcheck": "Checking result",
         "status.replanning": "Replanning",
-        "status.learning": "Updating memory",
         "status.paused": "Paused",
         "status.stopped": "Stopped",
         "status.failed": "Stopped by issue",
@@ -39,7 +38,6 @@ TEXTS = {
         "flow.executing": "Run action",
         "flow.postcheck": "Check result",
         "flow.replanning": "Replan",
-        "flow.learning": "Update memory",
         "flow.paused": "Paused",
         "flow.stopped": "Stopped",
         "flow.failed": "Failed",
@@ -48,14 +46,9 @@ TEXTS = {
         "result.failed": "Failed",
         "result.stopped": "Stopped",
         "result.skipped": "Skipped",
-        "knowledge.app_profile": "App knowledge",
-        "knowledge.app_memory": "Learning history",
-        "knowledge.task_recipe": "Action template",
-        "knowledge.task_memory": "Task learning",
         "knowledge.constitution": "Core rules",
-        "knowledge.policy": "Policy",
-        "knowledge.user": "Custom prompt",
-        "knowledge.learning": "Learning history",
+        "knowledge.systemprompt": "System prompt",
+        "knowledge.user": "Custom instructions",
         "app.windows_settings": "Windows Settings",
         "app.general": "General",
         "message.provider": "Codex is not ready. Open Settings and sign in with ChatGPT.",
@@ -72,7 +65,6 @@ TEXTS = {
         "message.phase_executing": "Running the next action on the desktop.",
         "message.phase_postcheck": "Checking the result after the action.",
         "message.phase_replanning": "Adjusting the plan after the last step.",
-        "message.phase_learning": "Saving useful knowledge from this run.",
         "message.phase_paused": "The run is paused.",
         "message.phase_stopped": "The run was stopped.",
         "message.phase_failed": "The run stopped because of an issue.",
@@ -101,6 +93,7 @@ TEXTS = {
         "message.moved_to_tray": "AutoCruise CE moved to the background. Use the floating controls or tray icon to pause or stop.",
         "message.moved_to_tray_shortcuts": "AutoCruise CE moved to the background. Pause: {pause}. Stop: {stop}.",
         "message.manager_subtitle": "Knowledge, threads, settings, and diagnostics.",
+        "message.custom_prompt_subtitle": "Custom instructions loaded with the constitution and system prompt.",
         "message.schedule_saved": "Schedule saved.",
         "message.schedule_deleted": "Schedule deleted.",
         "message.schedule_scheduler_error": "Windows Task Scheduler could not be updated.",
@@ -236,14 +229,7 @@ TEXTS = {
         "history.flow": "Flow",
         "history.confirmations": "Important notes",
         "history.failure_reason": "Failure reason",
-        "history.used_knowledge": "Used knowledge",
-        "history.learning_updated": "Memory updated",
-        "history.learning_yes": "Yes",
-        "history.learning_no": "No",
-        "category.app_knowledge": "App knowledge",
-        "category.action_templates": "Action templates",
-        "category.learning_history": "Learning history",
-        "category.custom_prompt": "Custom prompt",
+        "history.used_context": "Loaded prompt files",
         "window.details": "Details",
         "window.diagnostics": "Diagnostics",
         "window.management": "Management",
@@ -284,7 +270,6 @@ TEXTS = {
         "status.executing": "実行中",
         "status.postcheck": "結果を確認中",
         "status.replanning": "再計画中",
-        "status.learning": "学習を更新中",
         "status.paused": "一時停止中",
         "status.stopped": "停止",
         "status.failed": "問題により停止",
@@ -296,7 +281,6 @@ TEXTS = {
         "flow.executing": "操作実行",
         "flow.postcheck": "結果確認",
         "flow.replanning": "再計画",
-        "flow.learning": "学習更新",
         "flow.paused": "一時停止",
         "flow.stopped": "停止",
         "flow.failed": "失敗",
@@ -305,14 +289,9 @@ TEXTS = {
         "result.failed": "失敗",
         "result.stopped": "停止",
         "result.skipped": "スキップ",
-        "knowledge.app_profile": "アプリ知識",
-        "knowledge.app_memory": "学習履歴",
-        "knowledge.task_recipe": "操作テンプレート",
-        "knowledge.task_memory": "タスク学習",
         "knowledge.constitution": "基本ルール",
-        "knowledge.policy": "ポリシー",
+        "knowledge.systemprompt": "システムプロンプト",
         "knowledge.user": "カスタムプロンプト",
-        "knowledge.learning": "学習履歴",
         "app.windows_settings": "Windows 設定",
         "app.general": "一般",
         "message.provider": "Codex が利用できません。設定で ChatGPT にサインインしてください。",
@@ -329,7 +308,6 @@ TEXTS = {
         "message.phase_executing": "次の操作をデスクトップで実行しています。",
         "message.phase_postcheck": "操作後の結果を確認しています。",
         "message.phase_replanning": "直前の結果を踏まえて計画を調整しています。",
-        "message.phase_learning": "今回の実行で得た知識を保存しています。",
         "message.phase_paused": "実行は一時停止中です。",
         "message.phase_stopped": "実行は停止しました。",
         "message.phase_failed": "問題が発生したため実行を停止しました。",
@@ -493,14 +471,7 @@ TEXTS = {
         "history.flow": "フロー",
         "history.confirmations": "重要メモ",
         "history.failure_reason": "失敗理由",
-        "history.used_knowledge": "使用したナレッジ",
-        "history.learning_updated": "学習更新",
-        "history.learning_yes": "あり",
-        "history.learning_no": "なし",
-        "category.app_knowledge": "アプリ知識",
-        "category.action_templates": "操作テンプレート",
-        "category.learning_history": "学習履歴",
-        "category.custom_prompt": "カスタムプロンプト",
+        "history.used_context": "読み込んだプロンプト",
         "window.details": "詳細",
         "window.diagnostics": "診断",
         "window.management": "管理",
@@ -541,6 +512,10 @@ TEXTS["en"].update(
 TEXTS["ja"]["demo.secondary_goal"] = "設定を開いて Bluetooth の状態を確認する。"
 
 
+TEXTS["ja"]["history.used_context"] = "読み込んだプロンプト"
+TEXTS["ja"]["message.custom_prompt_subtitle"] = "constitution、systemprompt と一緒に読み込むカスタム指示です。"
+
+
 STATE_KEYS = {
     SessionState.IDLE.value: "status.ready",
     SessionState.LOADING_CONTEXT.value: "status.loading",
@@ -550,7 +525,6 @@ STATE_KEYS = {
     SessionState.EXECUTING.value: "status.executing",
     SessionState.POSTCHECK.value: "status.postcheck",
     SessionState.REPLANNING.value: "status.replanning",
-    SessionState.LEARNING_UPDATE.value: "status.learning",
     SessionState.PAUSED.value: "status.paused",
     SessionState.STOPPED.value: "status.stopped",
     SessionState.FAILED.value: "status.failed",
@@ -566,7 +540,6 @@ FLOW_KEYS = {
     SessionState.EXECUTING.value: "flow.executing",
     SessionState.POSTCHECK.value: "flow.postcheck",
     SessionState.REPLANNING.value: "flow.replanning",
-    SessionState.LEARNING_UPDATE.value: "flow.learning",
     SessionState.PAUSED.value: "flow.paused",
     SessionState.STOPPED.value: "flow.stopped",
     SessionState.FAILED.value: "flow.failed",
@@ -605,52 +578,10 @@ APP_KEYS = {
 }
 
 
-TASK_KEYS = {
-    "sample_excel_cleanup": "Excel Cleanup Sample",
-    "paint_simple_line_drawing": "Paint Simple Line Drawing",
-    "excel_sales_pipeline_update": "Excel Sales Pipeline Update",
-    "excel_invoice_reconciliation": "Excel Invoice Reconciliation",
-    "excel_monthly_chart_update": "Excel Monthly Chart Update",
-    "word_customer_quote": "Word Customer Quote",
-    "word_meeting_minutes_cleanup": "Word Meeting Minutes Cleanup",
-    "word_contract_redline_review": "Word Contract Redline Review",
-    "powerpoint_weekly_update": "PowerPoint Weekly Update",
-    "powerpoint_customer_pitch_update": "PowerPoint Customer Pitch Update",
-    "outlook_follow_up_email": "Outlook Follow-up Email",
-    "outlook_meeting_invite": "Outlook Meeting Invite",
-    "outlook_inbox_triage": "Outlook Inbox Triage",
-    "outlook_meeting_reschedule": "Outlook Meeting Reschedule",
-    "teams_meeting_notes": "Teams Meeting Notes",
-    "teams_followup_summary": "Teams Follow-up Summary",
-    "browser_market_research": "Browser Market Research",
-    "browser_crm_update": "Browser CRM Update",
-    "browser_expense_report_submission": "Browser Expense Report Submission",
-    "browser_portal_download_and_archive": "Browser Portal Download and Archive",
-    "browser_support_ticket_update": "Browser Support Ticket Update",
-    "file_cleanup_desktop": "File Cleanup Desktop",
-    "file_rename_and_archive": "File Rename and Archive",
-    "file_project_folder_setup": "File Project Folder Setup",
-    "pdf_review_and_annotation": "PDF Review and Annotation",
-    "pdf_merge_and_bookmark": "PDF Merge and Bookmark",
-    "photoshop_resize_and_export": "Photoshop Resize and Export",
-    "photoshop_banner_text_update": "Photoshop Banner Text Update",
-    "illustrator_simple_export": "Illustrator Simple Export",
-    "vscode_log_triage": "VS Code Log Triage",
-    "vscode_search_replace_review": "VS Code Search and Replace Review",
-    "terminal_build_and_diagnostics": "Terminal Build and Diagnostics",
-    "terminal_git_status_and_tests": "Terminal Git Status and Tests",
-}
-
-
 KNOWLEDGE_KEYS = {
-    "app_profile": "knowledge.app_profile",
-    "app_memory": "knowledge.app_memory",
-    "task_recipe": "knowledge.task_recipe",
-    "task_memory": "knowledge.task_memory",
     "constitution": "knowledge.constitution",
-    "policy": "knowledge.policy",
+    "systemprompt": "knowledge.systemprompt",
     "user": "knowledge.user",
-    "learning": "knowledge.learning",
 }
 
 
@@ -663,7 +594,6 @@ STATE_HINT_KEYS = {
     SessionState.EXECUTING.value: "message.phase_executing",
     SessionState.POSTCHECK.value: "message.phase_postcheck",
     SessionState.REPLANNING.value: "message.phase_replanning",
-    SessionState.LEARNING_UPDATE.value: "message.phase_learning",
     SessionState.PAUSED.value: "message.phase_paused",
     SessionState.STOPPED.value: "message.phase_stopped",
     SessionState.FAILED.value: "message.phase_failed",
@@ -744,16 +674,8 @@ def friendly_app_name(value: str) -> str:
     return mapped
 
 
-def friendly_task_name(value: str) -> str:
-    mapped = TASK_KEYS.get(value, "")
-    if mapped:
-        return mapped
-    words = str(value or "").replace("_", " ").strip()
-    return words.title() if words else ""
-
-
 def friendly_knowledge_kind(value: str) -> str:
-    return tr(KNOWLEDGE_KEYS.get(value, "knowledge.learning"))
+    return tr(KNOWLEDGE_KEYS.get(value, "knowledge.user"))
 
 
 def friendly_state_hint(value: str) -> str:

@@ -167,8 +167,6 @@ class WorkspacePaths:
         self.root = root
         self.data_root = data_root or root
         self.constitution_dir = root / "constitution"
-        self.apps_dir = root / "apps"
-        self.tasks_dir = root / "tasks"
         self.bundled_users_dir = root / "users"
         self.bundled_systemprompt_dir = self.bundled_users_dir / "default" / "systemprompt"
         self.users_dir = self.data_root / "users"
@@ -180,8 +178,6 @@ class WorkspacePaths:
     def ensure(self) -> None:
         for directory in (
             self.constitution_dir,
-            self.apps_dir,
-            self.tasks_dir,
             self.data_root,
             self.users_dir,
             self.systemprompt_dir,
@@ -191,14 +187,8 @@ class WorkspacePaths:
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        for log_name in ("execution_log.jsonl", "learning_log.jsonl", "audit_log.jsonl", "session_history.jsonl"):
+        for log_name in ("execution_log.jsonl", "audit_log.jsonl", "session_history.jsonl"):
             (self.logs_dir / log_name).touch(exist_ok=True)
-
-        for profile in self.apps_dir.glob("*/app_profile.md"):
-            (profile.parent / "app_memory.jsonl").touch(exist_ok=True)
-
-        for recipe in self.tasks_dir.glob("*/task_recipe.md"):
-            (recipe.parent / "task_memory.jsonl").touch(exist_ok=True)
 
         (self.users_dir / "default").mkdir(parents=True, exist_ok=True)
         self._seed_user_file("provider_settings.json")
@@ -212,12 +202,6 @@ class WorkspacePaths:
                 "# Default System Prompt\n\nFocus on practical progress and concise planning.\n",
                 encoding="utf-8",
             )
-
-    def app_memory_path(self, app_name: str) -> Path:
-        return self.apps_dir / app_name / "app_memory.jsonl"
-
-    def task_memory_path(self, task_name: str) -> Path:
-        return self.tasks_dir / task_name / "task_memory.jsonl"
 
     def provider_settings_path(self, user_id: str = "default") -> Path:
         return self.users_dir / user_id / "provider_settings.json"
@@ -322,9 +306,6 @@ class JsonlLogger:
 
     def execution(self, record: dict[str, Any]) -> None:
         append_jsonl(self.paths.logs_dir / "execution_log.jsonl", record)
-
-    def learning(self, record: dict[str, Any]) -> None:
-        append_jsonl(self.paths.logs_dir / "learning_log.jsonl", record)
 
     def audit(self, record: dict[str, Any]) -> None:
         append_jsonl(self.paths.logs_dir / "audit_log.jsonl", record)

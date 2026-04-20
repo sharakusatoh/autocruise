@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -14,7 +13,6 @@ from autocruise.domain.models import (
     ExpectedSignal,
     ExpectedSignalKind,
     ExecutionResult,
-    LearningEntry,
     Observation,
     ObservationKind,
     PlanStep,
@@ -23,15 +21,12 @@ from autocruise.domain.models import (
     ValidationResult,
     VerificationResult,
     WindowInfo,
-    utc_now,
 )
-from autocruise.infrastructure.storage import append_jsonl
 
 
 class MockAgentToolset:
-    def __init__(self, root: Path, memory_path: Path, live_planner=None) -> None:
+    def __init__(self, root: Path, live_planner=None) -> None:
         self.root = root
-        self.memory_path = memory_path
         self.live_planner = live_planner
         self.stage = 0
         self.reuse_postcheck_observation = False
@@ -250,39 +245,8 @@ class MockAgentToolset:
             return ValidationResult(True, 0.9, expected_outcome)
         return ValidationResult(False, 0.3, "Mock stage did not advance")
 
-    def update_memory(self, entry: LearningEntry) -> None:
-        target = self.root / "apps" / entry.app / "app_memory.jsonl"
-        append_jsonl(target if target.exists() else self.memory_path, asdict(entry))
-
     def abort_session(self, reason: str) -> None:
         self.stage = max(self.stage, 3)
-
-    def build_learning_entry(
-        self,
-        session_id: str,
-        action: Action,
-        observation: Observation,
-        app_name: str,
-        task_name: str = "",
-    ) -> LearningEntry:
-        now = utc_now()
-        return LearningEntry(
-            id=str(uuid.uuid4()),
-            app=app_name,
-            scope="task-pattern",
-            observation_pattern=observation.ui_tree_summary,
-            successful_action=f"{action.type.value}:{action.target.name or action.target.window_title}",
-            expected_outcome=action.expected_outcome,
-            confidence=min(0.55 + action.confidence / 2, 0.95),
-            evidence_count=1,
-            failure_count=0,
-            first_seen_at=now,
-            last_verified_at=now,
-            invalidation_hint="If the target control name or layout changes",
-            source_session_id=session_id,
-            task_id=task_name,
-            stage=str(self.stage),
-        )
 
     def _current_elements(self) -> list[DetectedElement]:
         if self.stage == 0:

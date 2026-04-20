@@ -48,7 +48,7 @@ def build_stylesheet() -> str:
     QLabel[role="brand"] {{
         color: {COLORS.text_primary};
         font-size: 19px;
-        font-weight: 400;
+        font-weight: 300;
         background: transparent;
         letter-spacing: 0.2px;
     }}

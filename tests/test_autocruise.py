@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -44,6 +44,7 @@ from autocruise.domain.models import (
     PlanStep,
     PostcheckData,
     PrecheckData,
+    ReplanningData,
     PointerPoint,
     PointerStroke,
     PrimarySensorSnapshot,
@@ -53,7 +54,6 @@ from autocruise.domain.models import (
     ScheduledJobState,
     SessionMission,
     SessionState,
-    LearningUpdateData,
     TargetRef,
     WindowInfo,
     utc_now,
@@ -75,7 +75,7 @@ from autocruise.infrastructure.storage import (
     load_structured,
     read_jsonl,
 )
-from autocruise.infrastructure.windows.global_hotkeys import hotkey_to_native, normalize_hotkey
+from autocruise.infrastructure.windows.global_hotkeys import GlobalHotkeyManager, hotkey_to_native, normalize_hotkey
 from autocruise.infrastructure.windows.input_executor import INPUT, KEYBDINPUT, InputExecutor, VK_LWIN, VK_RETURN, user32 as input_user32
 from autocruise.infrastructure.windows.observation_builder import WindowsObservationBuilder
 from autocruise.infrastructure.windows.primary_sensor import match_expected_signals
@@ -94,7 +94,6 @@ from autocruise.presentation.data_sources import (
 )
 from autocruise.presentation.labels import (
     friendly_state_hint,
-    friendly_task_name,
     sanitize_user_message,
     set_locale,
     tr,
@@ -104,6 +103,7 @@ from autocruise.presentation.ui.components import AppLineEdit, AppTextEditor
 from autocruise.presentation.ui.pages.home_page import HomePage
 from autocruise.presentation.ui.pages.history_page import HistoryPage
 from autocruise.presentation.ui.pages.settings_page import SettingsPage
+from autocruise.presentation.ui.theme import build_stylesheet
 from autocruise.presentation.ui.shell import (
     FloatingControlWidget,
     build_product_footer,
@@ -117,13 +117,9 @@ from autocruise.presentation.ui.shell import (
 
 def bootstrap_workspace(root: Path) -> WorkspacePaths:
     (root / "constitution").mkdir(parents=True, exist_ok=True)
-    (root / "apps" / "excel").mkdir(parents=True, exist_ok=True)
-    (root / "tasks" / "sample_excel_cleanup").mkdir(parents=True, exist_ok=True)
     (root / "users" / "default").mkdir(parents=True, exist_ok=True)
 
     (root / "constitution" / "constitution.md").write_text("# Test Constitution", encoding="utf-8")
-    (root / "apps" / "excel" / "app_profile.md").write_text("# Excel", encoding="utf-8")
-    (root / "tasks" / "sample_excel_cleanup" / "task_recipe.md").write_text("# Cleanup", encoding="utf-8")
     (root / "users" / "default" / "user_custom_prompt.md").write_text("# User Prompt", encoding="utf-8")
     (root / "users" / "default" / "preferences.yaml").write_text(
         json.dumps(
@@ -177,21 +173,27 @@ class FakeSecretStore:
 
 
 class RecordingProviderClient(ProviderClient):
-    def __init__(self, response_text: str = "OK") -> None:
-        self.response_text = response_text
+    def __init__(self, response_text: str | list[str] = "OK") -> None:
+        if isinstance(response_text, list):
+            self.responses = list(response_text)
+        else:
+            self.responses = [response_text]
         self.image_path = ""
         self.session_key = ""
         self.output_schema = None
         self.prompt = ""
         self.instructions = ""
+        self.calls = 0
 
     def generate_text(self, settings, api_key, instructions, prompt, image_path=None, session_key=None, output_schema=None):
+        self.calls += 1
         self.instructions = instructions
         self.prompt = prompt
         self.image_path = image_path or ""
         self.session_key = session_key or ""
         self.output_schema = output_schema
-        return self.response_text
+        index = min(self.calls - 1, len(self.responses) - 1)
+        return self.responses[index]
 
 
 class DummyObservationBuilder:
@@ -524,7 +526,7 @@ class AutoCruiseTests(unittest.TestCase):
                 "invalid",
             )
 
-    def test_state_machine_allows_learning_update_to_planning(self) -> None:
+    def test_state_machine_allows_postcheck_observation_reuse_to_planning(self) -> None:
         machine = SessionStateMachine()
         snapshot = machine.create("s1", SessionMission("test"))
         snapshot = machine.transition(
@@ -563,12 +565,7 @@ class AutoCruiseTests(unittest.TestCase):
             PostcheckData(action_summary="postcheck"),
             "postcheck",
         )
-        snapshot = machine.transition(
-            snapshot,
-            SessionState.LEARNING_UPDATE,
-            LearningUpdateData(entries=1),
-            "learn",
-        )
+        snapshot = machine.transition(snapshot, SessionState.OBSERVING, ObservingData(reason="reuse"), "reuse")
         snapshot = machine.transition(
             snapshot,
             SessionState.PLANNING,
@@ -577,43 +574,46 @@ class AutoCruiseTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.state, SessionState.PLANNING)
 
-    def test_retrieval_prefers_excel_context(self) -> None:
+    def test_retrieval_uses_only_prompt_sources(self) -> None:
         planner = RetrievalPlanner(self.temp_dir)
         context = planner.retrieve("Clean this Excel spreadsheet", stage="initial")
         paths = [Path(selection.path).name for selection in context.selections]
-        self.assertIn("app_profile.md", paths)
-        self.assertIn("task_recipe.md", paths)
-        self.assertIn("excel", context.app_candidates)
+        kinds = [selection.kind for selection in context.selections]
+        self.assertIn("constitution.md", paths)
+        self.assertIn("user_custom_prompt.md", paths)
+        self.assertIn("constitution", kinds)
+        self.assertIn("user", kinds)
+        self.assertEqual(context.app_candidates, [])
+        self.assertEqual(context.task_candidates, [])
 
     def test_retrieval_matches_new_sales_and_technical_templates(self) -> None:
         planner = RetrievalPlanner(ROOT)
 
-        sales_context = planner.retrieve("Outlookで受信トレイを整理して、重要な顧客メールは下書きまで作って", stage="initial")
-        self.assertIn("outlook", sales_context.app_candidates)
-        self.assertIn("outlook_inbox_triage", sales_context.task_candidates)
+        sales_context = planner.retrieve("Outlook縺ｧ蜿嶺ｿ｡繝医Ξ繧､繧呈紛逅・＠縺ｦ縲・㍾隕√↑鬘ｧ螳｢繝｡繝ｼ繝ｫ縺ｯ荳区嶌縺阪∪縺ｧ菴懊▲縺ｦ", stage="initial")
+        self.assertEqual(sales_context.app_candidates, [])
+        self.assertEqual(sales_context.task_candidates, [])
 
         technical_context = planner.retrieve(
-            "Visual Studio Codeで検索置換の候補を確認してから、PowerShellでgit statusを見てテストを実行して",
+            "Visual Studio Code縺ｧ讀懃ｴ｢鄂ｮ謠帙・蛟呵｣懊ｒ遒ｺ隱阪＠縺ｦ縺九ｉ縲￣owerShell縺ｧgit status繧定ｦ九※繝・せ繝医ｒ螳溯｡後＠縺ｦ",
             stage="initial",
         )
-        self.assertIn("vscode", technical_context.app_candidates)
-        self.assertIn("vscode_search_replace_review", technical_context.task_candidates)
-        self.assertIn("terminal_git_status_and_tests", technical_context.task_candidates)
+        self.assertEqual(technical_context.app_candidates, [])
+        self.assertEqual(technical_context.task_candidates, [])
 
     def test_retrieval_matches_paint_launch_and_drawing_templates(self) -> None:
         planner = RetrievalPlanner(ROOT)
-        context = planner.retrieve("ペイントを開いて簡単な猫の線画を描いて下さい。", stage="initial")
-        self.assertIn("paint", context.app_candidates)
-        self.assertIn("paint_simple_line_drawing", context.task_candidates)
+        context = planner.retrieve("Open Paint and draw a simple cat line art.", stage="initial")
+        self.assertEqual(context.app_candidates, [])
+        self.assertEqual(context.task_candidates, [])
         constitution = next(selection for selection in context.selections if Path(selection.path).name == "constitution.md")
-        self.assertNotIn("安全", constitution.excerpt)
+        self.assertNotIn("螳牙・", constitution.excerpt)
         self.assertNotIn("approval", constitution.excerpt.lower())
 
     def test_retrieval_matches_notepad_writing_templates(self) -> None:
         planner = RetrievalPlanner(ROOT)
-        context = planner.retrieve("メモ帳を開いて、次の文章を書いてください。", stage="initial")
-        self.assertIn("notepad", context.app_candidates)
-        self.assertIn("notepad_simple_writing", context.task_candidates)
+        context = planner.retrieve("Open Notepad and write a paragraph.", stage="initial")
+        self.assertEqual(context.app_candidates, [])
+        self.assertEqual(context.task_candidates, [])
 
     def test_workspace_paths_systemprompt_resolution_prefers_updated_bundled_prompt(self) -> None:
         data_root = self.temp_dir / "runtime-data"
@@ -648,7 +648,7 @@ class AutoCruiseTests(unittest.TestCase):
         paths.ensure()
         bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
         runtime = data_root / "users" / "default" / "systemprompt" / "AutoCruise.md"
-        runtime.write_bytes("日本語の実行指示".encode("cp932"))
+        runtime.write_bytes("譌･譛ｬ隱槭・螳溯｡梧欠遉ｺ".encode("cp932"))
         time.sleep(0.02)
         bundled.write_text("bundled utf-8 copy", encoding="utf-8")
         resolved = paths.resolve_systemprompt_path("AutoCruise.md")
@@ -671,34 +671,39 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(Path(selection.path), bundled)
         self.assertIn("bundled source of truth", selection.excerpt)
 
-    def test_prompt_library_assets_and_friendly_task_names_exist(self) -> None:
-        items = build_knowledge_items(WorkspacePaths(ROOT))
-        task_names = {item["name"] for item in items["action_templates"]}
-        prompt_library = ROOT / "docs" / "prompt_library.md"
-        prompt_text = prompt_library.read_text(encoding="utf-8")
+    def test_retrieval_uses_default_systemprompt_when_preference_key_is_missing(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        bundled.write_text("default execution prompt", encoding="utf-8")
+        preferences = load_structured(paths.preferences_path())
+        preferences.pop("selected_system_prompt", None)
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
 
-        self.assertIn("Excel Invoice Reconciliation", task_names)
-        self.assertIn("Outlook Inbox Triage", task_names)
-        self.assertIn("Terminal Git Status and Tests", task_names)
-        self.assertEqual(friendly_task_name("browser_support_ticket_update"), "Browser Support Ticket Update")
-        self.assertTrue(prompt_library.exists())
-        self.assertIn("# AutoCruise Prompt Library", prompt_text)
-        self.assertIn("営業", prompt_text)
-        self.assertIn("技術", prompt_text)
-        self.assertIn("Office", prompt_text)
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+
+        selection = next(item for item in context.selections if item.kind == "systemprompt")
+        self.assertEqual(Path(selection.path), bundled)
+        self.assertIn("default execution prompt", selection.excerpt)
+
+    def test_knowledge_items_only_include_custom_prompts(self) -> None:
+        items = build_knowledge_items(WorkspacePaths(ROOT))
+        self.assertEqual(sorted(items.keys()), ["custom_prompt"])
+        self.assertTrue(items["custom_prompt"])
+        self.assertTrue(all(item["kind"] == "user" for item in items["custom_prompt"]))
+
 
     def test_mock_orchestrator_runs_end_to_end(self) -> None:
         orchestrator = SessionOrchestrator(
             self.paths,
             toolset_factory=lambda: MockAgentToolset(
                 root=self.temp_dir,
-                memory_path=self.paths.app_memory_path("excel"),
             ),
         )
         result = orchestrator.run("Clean this Excel spreadsheet")
         self.assertEqual(result.state, SessionState.COMPLETED)
         self.assertGreater(len(read_jsonl(self.paths.logs_dir / "execution_log.jsonl")), 0)
-        self.assertGreater(len(read_jsonl(self.paths.logs_dir / "learning_log.jsonl")), 0)
         self.assertGreater(len(read_jsonl(self.paths.logs_dir / "audit_log.jsonl")), 0)
         self.assertGreater(len(read_jsonl(self.paths.logs_dir / "session_history.jsonl")), 0)
 
@@ -757,13 +762,13 @@ class AutoCruiseTests(unittest.TestCase):
                 self.execute_calls = 0
                 self.observation = Observation(
                     screenshot_path=None,
-                    active_window=WindowInfo(window_id=1, title="タイトルなし - メモ帳", class_name="Notepad"),
-                    visible_windows=[WindowInfo(window_id=1, title="タイトルなし - メモ帳", class_name="Notepad")],
+                    active_window=WindowInfo(window_id=1, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad"),
+                    visible_windows=[WindowInfo(window_id=1, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad")],
                     detected_elements=[],
                     ui_tree_summary="Notepad window",
                     cursor_position=(0, 0),
                     focused_element="ControlType.Document",
-                    textual_hints=["メモ帳"],
+                    textual_hints=["繝｡繝｢蟶ｳ"],
                     recent_actions=[],
                 )
 
@@ -784,12 +789,12 @@ class AutoCruiseTests(unittest.TestCase):
                     summary="Type into Notepad",
                     action=Action(
                         type=ActionType.TYPE_TEXT,
-                        target=TargetRef(window_title="タイトルなし - メモ帳", control_type="ControlType.Document"),
+                        target=TargetRef(window_title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", control_type="ControlType.Document"),
                         purpose="Type text",
                         reason="Editor is visible",
                         preconditions=[],
                         expected_outcome="Text appears",
-                        text="こんにちは",
+                        text="縺薙ｓ縺ｫ縺｡縺ｯ",
                     ),
                 )
 
@@ -808,21 +813,57 @@ class AutoCruiseTests(unittest.TestCase):
             def validate_outcome(self, expected_outcome: str, observation, previous_observation=None, action: Action | None = None):
                 return type("Validation", (), {"success": True, "confidence": 1.0, "details": expected_outcome})()
 
-            def update_memory(self, entry) -> None:
-                return None
-
             def abort_session(self, reason: str) -> None:
                 return None
 
-            def build_learning_entry(self, session_id: str, action: Action, observation, app_name: str, task_name: str = ""):
-                raise AssertionError("learning should not run after stop")
-
         toolset = StopBeforeExecuteToolset()
         orchestrator = SessionOrchestrator(self.paths, toolset_factory=lambda: toolset)
-        result = orchestrator.run("メモ帳を開いて文章を書いてください。")
+        result = orchestrator.run("Open Notepad and write a paragraph.")
 
         self.assertEqual(result.state, SessionState.STOPPED)
         self.assertEqual(toolset.execute_calls, 0)
+
+    def test_orchestrator_replanning_reuses_observation_without_invalid_transition(self) -> None:
+        machine = SessionStateMachine()
+        snapshot = machine.create("s1", SessionMission("Open Notepad and write a sentence."))
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.LOADING_CONTEXT,
+            LoadingContextData(goal="Open Notepad and write a sentence.", stage="initial"),
+            "load",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.OBSERVING,
+            ObservingData(reason="observe"),
+            "observe",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.PLANNING,
+            PlanningData(goal="Open Notepad and write a sentence."),
+            "plan",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.REPLANNING,
+            ReplanningData(failure_reason="Repeated action without progress", attempt=1),
+            "replan",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.OBSERVING,
+            ObservingData(reason="Reuse current observation for replanning"),
+            "reuse observation",
+        )
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.PLANNING,
+            PlanningData(goal="Open Notepad and write a sentence."),
+            "plan again",
+        )
+
+        self.assertEqual(snapshot.state, SessionState.PLANNING)
 
     def test_live_planner_parses_codex_response_without_api_key(self) -> None:
         settings = type(
@@ -1017,7 +1058,7 @@ class AutoCruiseTests(unittest.TestCase):
             textual_hints=[],
             recent_actions=[],
         )
-        plan = planner.plan("Paintで猫の線画を描く", observation, [], {"session_id": "paint-demo"})
+        plan = planner.plan("Draw a cat line art in Paint.", observation, [], {"session_id": "paint-demo"})
         self.assertEqual(plan.action.type, ActionType.DRAG)
         self.assertEqual(plan.action.drag_coordinate_mode, "relative")
         self.assertEqual(plan.plan_outline[:2], ["Launch complete", "Draw head outline"])
@@ -1096,7 +1137,7 @@ class AutoCruiseTests(unittest.TestCase):
             recent_actions=[],
         )
 
-        plan = planner.plan("ペイントで猫の線画を描いてください", observation, [], {"session_id": "paint-script-demo"})
+        plan = planner.plan("繝壹う繝ｳ繝医〒迪ｫ縺ｮ邱夂判繧呈緒縺・※縺上□縺輔＞", observation, [], {"session_id": "paint-script-demo"})
 
         self.assertEqual(plan.action.type, ActionType.DRAG)
         self.assertEqual(len(plan.action.pointer_script), 2)
@@ -1186,7 +1227,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(plan.action.wait_timeout_ms, 200)
         self.assertEqual(plan.action.expected_signals, [])
 
-    def test_live_planner_passes_session_key_for_codex(self) -> None:
+    def test_live_planner_uses_stateless_codex_turns(self) -> None:
         settings = type(
             "Settings",
             (),
@@ -1246,7 +1287,7 @@ class AutoCruiseTests(unittest.TestCase):
         )
         plan = planner.plan("Wait for the app", observation, [], {"session_id": "session-123"})
         self.assertIsInstance(plan, PlanStep)
-        self.assertEqual(client.session_key, "session-123")
+        self.assertFalse(client.session_key)
 
     def test_live_planner_omits_image_for_structured_observation_and_passes_output_schema(self) -> None:
         settings = type(
@@ -1436,6 +1477,150 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(payload["repeat_guard"]["repeat_streak"], 2)
         self.assertEqual(payload["repeat_guard"]["avoid_signature"], "type_text|editor_surface|Hello.")
 
+    def test_live_planner_repairs_wait_for_active_editor_authoring_task(self) -> None:
+        settings = type(
+            "Settings",
+            (),
+            {
+                "provider": "codex",
+                "base_url": "codex app-server",
+                "model": "gpt-5.4",
+                "timeout_seconds": 30,
+                "retry_count": 0,
+                "max_tokens": 500,
+                "allow_images": True,
+                "is_default": True,
+            },
+        )()
+        client = RecordingProviderClient(
+            [
+                json.dumps(
+                    {
+                        "summary": "Wait.",
+                        "reasoning": "The editor might still be settling.",
+                        "plan_outline": [],
+                        "is_complete": False,
+                        "completion_reason": "",
+                        "action": {
+                            "type": "wait",
+                            "target": {
+                                "window_title": "繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ",
+                                "automation_id": "",
+                                "name": "",
+                                "control_type": "",
+                                "fallback_visual_hint": "",
+                                "search_terms": [],
+                                "backend_hint": "",
+                            },
+                            "purpose": "Wait",
+                            "reason": "The editor might still be settling.",
+                            "preconditions": [],
+                            "expected_outcome": "The UI becomes ready.",
+                            "risk_level": "low",
+                            "confidence": 0.5,
+                            "text": "",
+                            "hotkey": "",
+                            "scroll_amount": 0,
+                            "drag_coordinate_mode": "absolute",
+                            "drag_path": [],
+                            "drag_duration_ms": 0,
+                            "pointer_script": [],
+                            "shell_kind": "powershell",
+                            "shell_command": "",
+                            "shell_cwd": "",
+                            "shell_timeout_seconds": 20,
+                            "shell_detach": False,
+                            "wait_timeout_ms": 1000,
+                            "expected_signals": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "summary": "Type the draft.",
+                        "reasoning": "The editor is already open, so the next concrete step is to write the requested content.",
+                        "plan_outline": ["type the draft", "save after writing"],
+                        "is_complete": False,
+                        "completion_reason": "",
+                        "action": {
+                            "type": "type_text",
+                            "target": {
+                                "window_title": "繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ",
+                                "automation_id": "",
+                                "name": "editor_surface",
+                                "control_type": "ControlType.Document",
+                                "fallback_visual_hint": "editor:window",
+                                "search_terms": ["繝｡繝｢蟶ｳ", "document"],
+                                "backend_hint": "uia",
+                            },
+                            "purpose": "Write the requested text into Notepad.",
+                            "reason": "The active editor is ready for input.",
+                            "preconditions": [],
+                            "expected_outcome": "The editor content updates with the draft.",
+                            "risk_level": "low",
+                            "confidence": 0.78,
+                            "text": "We are improving stable Windows desktop operation.",
+                            "hotkey": "",
+                            "scroll_amount": 0,
+                            "drag_coordinate_mode": "absolute",
+                            "drag_path": [],
+                            "drag_duration_ms": 0,
+                            "pointer_script": [],
+                            "shell_kind": "powershell",
+                            "shell_command": "",
+                            "shell_cwd": "",
+                            "shell_timeout_seconds": 20,
+                            "shell_detach": False,
+                            "wait_timeout_ms": 1200,
+                            "expected_signals": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+
+        class RecordingRegistry:
+            def get(self, provider: str):
+                return client
+
+        planner = LiveActionPlanner(
+            provider_repo=FakeProviderRepo(settings),
+            secret_store=FakeSecretStore(""),
+            provider_registry=RecordingRegistry(),
+        )
+        observation = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=1, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad"),
+            visible_windows=[WindowInfo(window_id=1, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad")],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor open",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["Notepad", "editor"],
+            recent_actions=[],
+            raw_ref={"observation_kind": ObservationKind.STRUCTURED.value, "vision_fallback_required": False},
+        )
+        context = {
+            "session_id": "editor-repair",
+            "retrieved_context": RetrievedContext(
+                goal="Open Notepad and write what you are thinking now.",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            ),
+        }
+
+        plan = planner.plan("Open Notepad and write what you are thinking now.", observation, [], context)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertEqual(client.calls, 2)
+
     def test_live_planner_parses_target_search_terms_and_backend_hint(self) -> None:
         settings = type(
             "Settings",
@@ -1537,13 +1722,13 @@ class AutoCruiseTests(unittest.TestCase):
             provider_registry=FakeProviderRegistry("{}"),
         )
         context = RetrievedContext(
-            goal="ペイントを開いて猫を描く",
+            goal="Open Paint and draw a cat.",
             stage="initial",
             app_candidates=["paint"],
             task_candidates=["paint_simple_line_drawing"],
             selections=[],
         )
-        instructions = planner._build_instructions("ペイントを開いて猫を描く", context)
+        instructions = planner._build_instructions("Open Paint and draw a cat.", context)
         self.assertIn("Paint -> mspaint", instructions)
         self.assertNotIn("Visual Studio Code -> code", instructions)
 
@@ -1568,13 +1753,13 @@ class AutoCruiseTests(unittest.TestCase):
             provider_registry=FakeProviderRegistry("{}"),
         )
         context = RetrievedContext(
-            goal="ペイントを開いて、簡単な猫の絵を描いてください。",
+            goal="Open Paint and draw a simple cat picture.",
             stage="initial",
             app_candidates=["vscode", "paint"],
             task_candidates=["paint_simple_line_drawing"],
             selections=[],
         )
-        instructions = planner._build_instructions("ペイントを開いて、簡単な猫の絵を描いてください。", context)
+        instructions = planner._build_instructions("Open Paint and draw a simple cat picture.", context)
         self.assertIn("Paint -> mspaint", instructions)
         self.assertNotIn("Visual Studio Code -> code", instructions)
 
@@ -1857,6 +2042,31 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIsNotNone(hotkey_to_native("F12"))
         self.assertIsNotNone(hotkey_to_native("Ctrl+Alt+S"))
 
+    def test_global_hotkey_manager_polls_when_native_registration_fails(self) -> None:
+        manager = GlobalHotkeyManager()
+        emitted: list[str] = []
+        pressed = False
+        manager.activated.connect(emitted.append)
+        manager._register_hotkey = lambda hotkey_id, modifiers, vk: False  # type: ignore[method-assign]
+        manager._key_down = lambda vk: pressed and vk == 0x7B  # type: ignore[method-assign]
+        try:
+            failures = manager.apply_bindings({"stop": "F12"})
+            self.assertEqual(failures, [])
+            manager._poll_bindings()
+            self.assertEqual(emitted, [])
+            pressed = True
+            manager._poll_bindings()
+            self.assertEqual(emitted, ["stop"])
+            manager._poll_bindings()
+            self.assertEqual(emitted, ["stop"])
+            pressed = False
+            manager._poll_bindings()
+            pressed = True
+            manager._poll_bindings()
+            self.assertEqual(emitted, ["stop", "stop"])
+        finally:
+            manager.close()
+
     def test_sanitize_user_message_localizes_common_codex_messages(self) -> None:
         set_locale("ja")
         self.assertIn("ChatGPT", sanitize_user_message("Codex is not signed in with ChatGPT."))
@@ -1923,7 +2133,7 @@ class AutoCruiseTests(unittest.TestCase):
         set_locale("en")
         self.assertNotIn("safe", friendly_state_hint(SessionState.PLANNING.value).lower())
         set_locale("ja")
-        self.assertNotIn("安全", friendly_state_hint(SessionState.PLANNING.value))
+        self.assertNotIn("螳牙・", friendly_state_hint(SessionState.PLANNING.value))
         set_locale("en")
 
     def test_codex_sign_in_messages_no_longer_reference_refresh_status(self) -> None:
@@ -1931,8 +2141,8 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertNotIn("Refresh status", tr("message.codex_browser_opened"))
         self.assertNotIn("Refresh status", tr("message.codex_cached_session"))
         set_locale("ja")
-        self.assertNotIn("状態を更新", tr("message.codex_browser_opened"))
-        self.assertNotIn("状態を更新", tr("message.codex_cached_session"))
+        self.assertNotIn("迥ｶ諷九ｒ譖ｴ譁ｰ", tr("message.codex_browser_opened"))
+        self.assertNotIn("迥ｶ諷九ｒ譖ｴ譁ｰ", tr("message.codex_cached_session"))
         set_locale("en")
 
     def test_notice_label_style_uses_expected_color_per_tone(self) -> None:
@@ -1970,8 +2180,9 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(page.goal_input.placeholderText(), "")
 
     def test_settings_page_treats_blank_max_steps_as_unlimited(self) -> None:
+        set_locale("en")
         page = SettingsPage()
-        page.set_general_values("ja", "autonomous", None, "F8", "F12")
+        page.set_general_values("en", "autonomous", None, "F8", "F12")
         self.assertEqual(page.max_steps_edit.text(), "")
         self.assertEqual(page.max_steps_edit.placeholderText(), "Unlimited")
         payload = page.general_payload()
@@ -2055,13 +2266,13 @@ class AutoCruiseTests(unittest.TestCase):
     def test_windows_requested_launch_app_prefers_explicit_goal_over_context_order(self) -> None:
         toolset = self._make_windows_toolset()
         context = RetrievedContext(
-            goal="ペイントを開いて、簡単な猫の絵を描いてください。",
+            goal="Open Paint and draw a simple cat picture.",
             stage="initial",
             app_candidates=["vscode", "paint"],
             task_candidates=["paint_simple_line_drawing"],
             selections=[],
         )
-        app_name = toolset._requested_launch_app("ペイントを開いて、簡単な猫の絵を描いてください。", context)
+        app_name = toolset._requested_launch_app("Open Paint and draw a simple cat picture.", context)
         self.assertEqual(app_name, "paint")
 
     def test_windows_validation_requires_real_change(self) -> None:
@@ -2204,7 +2415,7 @@ class AutoCruiseTests(unittest.TestCase):
             reason="The editor is ready.",
             preconditions=[],
             expected_outcome="The editor content updates.",
-            text="こんにちは",
+            text="縺薙ｓ縺ｫ縺｡縺ｯ",
         )
         toolset = self._make_windows_toolset()
         previous = Observation(
@@ -2269,7 +2480,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertTrue(observation.raw_ref["automation"]["availability"]["uia"])
         self.assertFalse(observation.raw_ref["automation"]["availability"]["playwright"])
 
-    def test_windows_capture_observation_reuses_previous_snapshot_and_skips_live_planner(self) -> None:
+    def test_windows_capture_observation_reuses_previous_snapshot_and_still_calls_live_planner(self) -> None:
         previous = Observation(
             screenshot_path="demo.png",
             active_window=WindowInfo(window_id=1, title="Excel", process_id=123),
@@ -2311,7 +2522,6 @@ class AutoCruiseTests(unittest.TestCase):
         )
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=builder,
             window_manager=DummyWindowManager(),
             input_executor=DummyInputExecutor(),
@@ -2324,7 +2534,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(builder.reuse_calls, 1)
         self.assertEqual(observation.raw_ref["planner_skip_reason"], "sensor_unchanged")
         plan = toolset.plan_next_action("Continue to the next step in Excel", observation, [], None)
-        self.assertEqual(live_planner.calls, 0)
+        self.assertEqual(live_planner.calls, 1)
         self.assertEqual(plan.action.type, ActionType.CLICK)
 
     def test_windows_observation_builder_numbers_ui_candidates_and_separates_ocr_text(self) -> None:
@@ -2411,7 +2621,6 @@ class AutoCruiseTests(unittest.TestCase):
         )
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=builder,
             window_manager=DummyWindowManager(),
             input_executor=DummyInputExecutor(),
@@ -2478,7 +2687,6 @@ class AutoCruiseTests(unittest.TestCase):
         )
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=builder,
             window_manager=DummyWindowManager(),
             input_executor=DummyInputExecutor(),
@@ -2589,7 +2797,6 @@ class AutoCruiseTests(unittest.TestCase):
         uia_adapter = UIAAdapter(FakeUiaClient({"find": payload, "click": click_result}))
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=DummyObservationBuilder(),
             window_manager=DummyWindowManager(),
             input_executor=RaisingInputExecutor(),
@@ -2728,11 +2935,18 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(widget.logo_label.width(), 30)
         self.assertIn("background: transparent", widget.logo_label.styleSheet())
         self.assertIn("font-size: 21px", widget.title_label.styleSheet())
+        self.assertIn("font-weight: 300", widget.title_label.styleSheet())
+
+    def test_main_brand_title_uses_light_weight(self) -> None:
+        stylesheet = build_stylesheet()
+
+        self.assertIn('QLabel[role="brand"]', stylesheet)
+        self.assertIn("font-weight: 300;", stylesheet)
 
     def test_windows_verify_target_uses_global_uia_lookup_for_visual_plan_targets(self) -> None:
         search_box = DetectedElement(
             window_id=None,
-            name="検索",
+            name="讀懃ｴ｢",
             automation_id="SearchButton",
             control_type="ControlType.Button",
             bounds=Bounds(653, 1040, 220, 32),
@@ -2740,21 +2954,20 @@ class AutoCruiseTests(unittest.TestCase):
         )
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=DummyObservationBuilder(),
             window_manager=DummyWindowManager(),
             input_executor=DummyInputExecutor(),
-            uia_adapter=QueryAwareUIAAdapter({"検索": [search_box], "SearchButton": [search_box]}),
+            uia_adapter=QueryAwareUIAAdapter({"讀懃ｴ｢": [search_box], "SearchButton": [search_box]}),
             live_planner=None,
         )
         action = Action(
             type=ActionType.CLICK,
             target=TargetRef(
-                name="検索",
+                name="讀懃ｴ｢",
                 automation_id="SearchButton",
                 control_type="ControlType.Edit",
                 bounds=Bounds(464, 742, 96, 24),
-                fallback_visual_hint="Windows taskbar search box labeled 検索 near the bottom center of the screen",
+                fallback_visual_hint="Windows taskbar search box labeled 讀懃ｴ｢ near the bottom center of the screen",
             ),
             purpose="Bring up Windows Search so GIMP can be launched.",
             reason="GIMP is not visible.",
@@ -2810,7 +3023,7 @@ class AutoCruiseTests(unittest.TestCase):
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="ペイントを開いて簡単な猫の線画を描いて下さい。",
+                goal="Open Paint and draw a simple cat line art.",
                 stage="initial",
                 app_candidates=["paint"],
                 task_candidates=["paint_simple_line_drawing"],
@@ -2828,7 +3041,7 @@ class AutoCruiseTests(unittest.TestCase):
             textual_hints=["Desktop"],
             recent_actions=[],
         )
-        plan = toolset.plan_next_action("ペイントを開いて簡単な猫の線画を描いて下さい。", observation, [], context)
+        plan = toolset.plan_next_action("Open Paint and draw a simple cat line art.", observation, [], context)
         self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
         self.assertEqual(plan.action.shell_kind, "process")
         self.assertEqual(plan.action.shell_command, "mspaint")
@@ -2839,7 +3052,7 @@ class AutoCruiseTests(unittest.TestCase):
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="ペイントを開いて簡単な猫の線画を描いて下さい。",
+                goal="Open Paint and draw a simple cat line art.",
                 stage="initial",
                 app_candidates=["paint"],
                 task_candidates=["paint_simple_line_drawing"],
@@ -2874,7 +3087,7 @@ class AutoCruiseTests(unittest.TestCase):
             },
         )
         plan = toolset.plan_next_action(
-            "ペイントを開いて簡単な猫の線画を描いて下さい。",
+            "Open Paint and draw a simple cat line art.",
             observation,
             [],
             {
@@ -2889,7 +3102,7 @@ class AutoCruiseTests(unittest.TestCase):
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="メモ帳を開いて文章を書く",
+                goal="Open Notepad and write a paragraph.",
                 stage="initial",
                 app_candidates=["notepad"],
                 task_candidates=["notepad_simple_writing"],
@@ -2908,7 +3121,7 @@ class AutoCruiseTests(unittest.TestCase):
             recent_actions=[],
         )
 
-        plan = toolset.plan_next_action("メモ帳を開いて文章を書く", observation, [], context)
+        plan = toolset.plan_next_action("Open Notepad and write a paragraph.", observation, [], context)
 
         self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
         self.assertEqual(plan.action.shell_kind, "process")
@@ -2920,7 +3133,7 @@ class AutoCruiseTests(unittest.TestCase):
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="メモ帳を開いて、「こんにちは」と書いてください。",
+                goal='Open Notepad and write "hello".',
                 stage="initial",
                 app_candidates=["notepad"],
                 task_candidates=["notepad_simple_writing"],
@@ -2939,10 +3152,10 @@ class AutoCruiseTests(unittest.TestCase):
             recent_actions=[],
         )
 
-        plan = toolset.plan_next_action("メモ帳を開いて、「こんにちは」と書いてください。", observation, [], context)
+        plan = toolset.plan_next_action('Open Notepad and write "hello".', observation, [], context)
 
         self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
-        self.assertEqual(plan.action.text, "こんにちは")
+        self.assertEqual(plan.action.text, "hello")
         self.assertEqual(plan.action.target.window_title, "Untitled - Notepad")
         self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
 
@@ -3040,9 +3253,8 @@ class AutoCruiseTests(unittest.TestCase):
 
         plan = toolset.plan_next_action("Open Notepad and write a self introduction.", observation, recent_actions, context)
 
-        self.assertFalse(plan.is_complete)
-        self.assertIsNotNone(plan.action)
-        self.assertEqual(plan.action.type, ActionType.WAIT)
+        self.assertTrue(plan.is_complete)
+        self.assertIsNone(plan.action)
 
     def test_windows_toolset_does_not_repeat_editor_text_when_title_changes_after_edit(self) -> None:
         toolset = self._make_windows_toolset()
@@ -3099,9 +3311,8 @@ class AutoCruiseTests(unittest.TestCase):
 
         plan = toolset.plan_next_action("Open Notepad, write a self introduction.", observation, recent_actions, context)
 
-        self.assertFalse(plan.is_complete)
-        self.assertIsNotNone(plan.action)
-        self.assertEqual(plan.action.type, ActionType.WAIT)
+        self.assertTrue(plan.is_complete)
+        self.assertIsNone(plan.action)
 
     def test_windows_toolset_requests_save_after_successful_editor_text_entry(self) -> None:
         toolset = self._make_windows_toolset()
@@ -3291,13 +3502,13 @@ class AutoCruiseTests(unittest.TestCase):
         )
         current = Observation(
             screenshot_path=None,
-            active_window=WindowInfo(window_id=20, title="タイトルなし - メモ帳", class_name="Notepad"),
-            visible_windows=[WindowInfo(window_id=20, title="タイトルなし - メモ帳", class_name="Notepad")],
+            active_window=WindowInfo(window_id=20, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad"),
+            visible_windows=[WindowInfo(window_id=20, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad")],
             detected_elements=[],
             ui_tree_summary="Japanese Notepad window visible",
             cursor_position=(0, 0),
             focused_element="ControlType.Document:Text Editor",
-            textual_hints=["メモ帳"],
+            textual_hints=["繝｡繝｢蟶ｳ"],
             recent_actions=[],
             raw_ref={
                 "last_execution": {
@@ -3366,7 +3577,6 @@ class AutoCruiseTests(unittest.TestCase):
     def test_mock_toolset_captures_png_screenshots(self) -> None:
         toolset = MockAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
         )
         observation = toolset.capture_observation("demo")
         self.assertTrue(observation.screenshot_path.endswith(".png"))
@@ -3493,18 +3703,6 @@ class AutoCruiseTests(unittest.TestCase):
                 self.paths.logs_dir / "execution_log.jsonl",
                 {"session_id": "sess-1", "type": "action"},
             ),
-            (
-                self.paths.logs_dir / "learning_log.jsonl",
-                {"session_id": "sess-1", "entry": {"id": "l1", "source_session_id": "sess-1"}},
-            ),
-            (
-                self.paths.logs_dir / "learning_log.jsonl",
-                {"entry": {"id": "l2", "source_session_id": "sess-1"}},
-            ),
-            (
-                self.paths.logs_dir / "learning_log.jsonl",
-                {"session_id": "sess-2", "entry": {"id": "l3", "source_session_id": "sess-2"}},
-            ),
         ):
             append_jsonl(path, record)
 
@@ -3522,10 +3720,6 @@ class AutoCruiseTests(unittest.TestCase):
         )
         self.assertEqual(read_jsonl(self.paths.logs_dir / "audit_log.jsonl"), [])
         self.assertEqual(read_jsonl(self.paths.logs_dir / "execution_log.jsonl"), [])
-        self.assertEqual(
-            [item.get("session_id") for item in read_jsonl(self.paths.logs_dir / "learning_log.jsonl")],
-            ["sess-2"],
-        )
         self.assertFalse((self.paths.screenshots_dir / "session_sess-1").exists())
         self.assertTrue((self.paths.screenshots_dir / "session_sess-2").exists())
 
@@ -3614,7 +3808,6 @@ class AutoCruiseTests(unittest.TestCase):
             ROOT / "README.md",
             ROOT / "information.md",
             ROOT / "docs" / "architecture.md",
-            ROOT / "docs" / "prompt_library.md",
             ROOT / "docs" / "release_qa_checklist.md",
         ]
         for path in document_paths:
@@ -3750,11 +3943,11 @@ class AutoCruiseTests(unittest.TestCase):
 
         executor._send_hotkey = fake_hotkey
 
-        ok, details = executor._send_text("こんにちは")
+        ok, details = executor._send_text("縺薙ｓ縺ｫ縺｡縺ｯ")
 
         self.assertTrue(ok)
         self.assertIn("Pasted text", details)
-        self.assertEqual(clipboard_writes, ["こんにちは", "before"])
+        self.assertEqual(clipboard_writes, ["縺薙ｓ縺ｫ縺｡縺ｯ", "before"])
         self.assertEqual(hotkeys, ["CTRL+V"])
 
     def test_input_executor_focuses_window_using_launch_marker_app_key(self) -> None:
@@ -3765,7 +3958,7 @@ class AutoCruiseTests(unittest.TestCase):
             def find_window(self, title: str):
                 lookups.append(title)
                 if title == "notepad":
-                    return WindowInfo(window_id=44, title="タイトルなし - メモ帳", class_name="Notepad")
+                    return WindowInfo(window_id=44, title="繧ｿ繧､繝医Ν縺ｪ縺・- 繝｡繝｢蟶ｳ", class_name="Notepad")
                 return None
 
             def focus_window(self, window_id: int) -> bool:
@@ -3905,7 +4098,6 @@ class AutoCruiseTests(unittest.TestCase):
     def test_windows_execute_action_catches_executor_exceptions(self) -> None:
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=DummyObservationBuilder(),
             window_manager=DummyWindowManager(),
             input_executor=RaisingInputExecutor(),
@@ -3983,7 +4175,6 @@ class AutoCruiseTests(unittest.TestCase):
         shell_executor = DummyShellExecutor(shell_result)
         toolset = WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=builder,
             window_manager=DummyWindowManager(),
             input_executor=DummyInputExecutor(),
@@ -4040,7 +4231,6 @@ class AutoCruiseTests(unittest.TestCase):
     def _make_windows_toolset(self) -> WindowsAgentToolset:
         return WindowsAgentToolset(
             root=self.temp_dir,
-            memory_path=self.paths.app_memory_path("excel"),
             observation_builder=DummyObservationBuilder(),
             window_manager=DummyWindowManager(),
             input_executor=DummyInputExecutor(),

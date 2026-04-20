@@ -17,18 +17,15 @@ from autocruise.domain.models import (
     ExpectedSignal,
     ExpectedSignalKind,
     ExecutionResult,
-    LearningEntry,
     Observation,
     ObservationKind,
     PlanStep,
     TargetRef,
     ValidationResult,
     VerificationResult,
-    utc_now,
 )
 from autocruise.infrastructure.automation import AutomationRouter
 from autocruise.infrastructure.browser.sensor import BrowserSensorHub
-from autocruise.infrastructure.storage import append_jsonl
 from autocruise.infrastructure.windows.input_executor import InputExecutor
 from autocruise.infrastructure.windows.observation_builder import WindowsObservationBuilder
 from autocruise.infrastructure.windows.primary_sensor import PrimarySensorHub, observation_sensor_snapshot
@@ -83,7 +80,6 @@ class WindowsAgentToolset:
     def __init__(
         self,
         root: Path,
-        memory_path: Path,
         observation_builder: WindowsObservationBuilder,
         window_manager: WindowManager,
         input_executor: InputExecutor,
@@ -95,7 +91,6 @@ class WindowsAgentToolset:
         shell_executor: ShellExecutor | None = None,
     ) -> None:
         self.root = root
-        self.memory_path = memory_path
         self.observation_builder = observation_builder
         self.window_manager = window_manager
         self.input_executor = input_executor
@@ -244,11 +239,19 @@ class WindowsAgentToolset:
         launch_step = self._plan_direct_app_launch(goal, observation, recent_actions, retrieved_context, planning_meta)
         if launch_step is not None:
             return self._with_wait_defaults(launch_step)
-        skip_live_replan = bool((observation.raw_ref or {}).get("planner_skip_reason"))
-        if self.live_planner is not None and not skip_live_replan:
+        completion_step = self._complete_editor_goal_if_ready(goal, observation, recent_actions, retrieved_context)
+        if self.live_planner is not None:
             live_plan = self.live_planner.plan(goal, observation, recent_actions, context)
             if live_plan is not None:
+                if self._looks_like_editor_goal(goal, retrieved_context):
+                    live_plan = self._override_editor_wait(goal, observation, recent_actions, retrieved_context, live_plan)
+                if completion_step is not None and (
+                    live_plan.is_complete or live_plan.action is None or live_plan.action.type == ActionType.WAIT
+                ):
+                    return self._with_wait_defaults(completion_step)
                 return self._with_wait_defaults(live_plan)
+        if completion_step is not None:
+            return self._with_wait_defaults(completion_step)
 
         preferred_window = self._pick_window(goal, observation.visible_windows, retrieved_context)
         if preferred_window and (
@@ -503,39 +506,8 @@ class WindowsAgentToolset:
             return ValidationResult(True, 0.56, expected_outcome or "Observation refreshed after wait or scroll.")
         return ValidationResult(False, 0.35, "No visible change detected after action")
 
-    def update_memory(self, entry: LearningEntry) -> None:
-        target = self.root / "apps" / entry.app / "app_memory.jsonl"
-        append_jsonl(target if target.exists() else self.memory_path, asdict(entry))
-
     def abort_session(self, reason: str) -> None:
         return None
-
-    def build_learning_entry(
-        self,
-        session_id: str,
-        action: Action,
-        observation: Observation,
-        app_name: str,
-        task_name: str = "",
-    ) -> LearningEntry:
-        now = utc_now()
-        return LearningEntry(
-            id=str(uuid.uuid4()),
-            app=app_name,
-            scope="runtime-observation",
-            observation_pattern=observation.ui_tree_summary,
-            successful_action=f"{action.type.value}:{action.target.name or action.target.window_title}",
-            expected_outcome=action.expected_outcome,
-            confidence=min(0.45 + action.confidence / 2, 0.9),
-            evidence_count=1,
-            failure_count=0,
-            first_seen_at=now,
-            last_verified_at=now,
-            invalidation_hint="If the window title, control name, or layout changes",
-            source_session_id=session_id,
-            task_id=task_name,
-            stage="windows",
-        )
 
     def _with_wait_defaults(self, plan: PlanStep) -> PlanStep:
         action = plan.action
@@ -1031,20 +1003,9 @@ class WindowsAgentToolset:
                     return candidate
         return ""
     def _synthesize_editor_text_draft(self, goal: str, retrieved_context, requested_text: str) -> str:
-        if requested_text:
-            return requested_text
-        if not self._looks_like_editor_goal(goal, retrieved_context):
-            return ""
-        normalized_goal = self._normalize_text(goal)
-        if any(token in normalized_goal for token in ("自己紹介", "introduceyourself", "selfintroduction", "introducemyself")):
-            return "こんにちは。私はAutoCruise CEです。Windows上の操作を支援するデスクトップオペレーターです。よろしくお願いします。"
-        if any(token in normalized_goal for token in ("挨拶", "greeting", "あいさつ")):
-            return "こんにちは。よろしくお願いします。"
-        if any(token in normalized_goal for token in ("簡単な文章", "短文", "shortnote", "shorttext", "メモ", "note")):
-            return "こんにちは。これは簡単なメモです。"
-        if any(token in normalized_goal for token in ("文章", "テキスト", "write", "writing", "type", "paragraph", "sentence")):
-            return "こんにちは。AutoCruise CEが文章入力を行っています。"
-        return ""
+        _ = goal
+        _ = retrieved_context
+        return requested_text
 
     def _looks_like_editor_goal(self, goal: str, retrieved_context) -> bool:
         if self._requested_launch_app(goal, retrieved_context) == "notepad":
@@ -1455,12 +1416,15 @@ class WindowsAgentToolset:
                 return None
             return self._with_wait_defaults(self._build_editor_type_step(observation, draft_text))
 
+        if self._editor_text_recently_completed(observation, recent_actions, editor_anchor, completion_text):
+            save_step = self._plan_editor_save_action(goal, observation, recent_actions, retrieved_context)
+            if save_step is not None:
+                return self._with_wait_defaults(save_step)
+            return None
+
         if not self._is_edit_focus(observation.focused_element):
             if not self._recently_repeated(recent_actions, ActionType.CLICK, editor_anchor):
                 return self._with_wait_defaults(self._build_editor_click_step(observation))
-        save_step = self._plan_editor_save_action(goal, observation, recent_actions, retrieved_context)
-        if save_step is not None:
-            return self._with_wait_defaults(save_step)
         return None
 
     def _override_editor_wait(
@@ -1498,7 +1462,10 @@ class WindowsAgentToolset:
         requested_text = self._extract_requested_text(goal)
         draft_text = self._synthesize_editor_text_draft(goal, retrieved_context, requested_text)
         editor_anchor = self._editor_anchor(observation)
-        if not draft_text:
+        last_typed_text = ""
+        if recent_actions and recent_actions[-1].type == ActionType.TYPE_TEXT:
+            last_typed_text = str(recent_actions[-1].text or "").strip()
+        if not (draft_text or last_typed_text):
             return None
         if not self._editor_text_recently_completed(observation, recent_actions, editor_anchor, requested_text or ""):
             return None

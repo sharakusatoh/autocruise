@@ -10,7 +10,6 @@ from autocruise.presentation.labels import (
     friendly_job_state,
     friendly_knowledge_kind,
     friendly_result,
-    friendly_task_name,
     tr,
 )
 
@@ -43,11 +42,6 @@ def load_session_detail(paths: WorkspacePaths, session_id: str) -> dict:
     )
     audit = [item for item in read_jsonl(paths.logs_dir / "audit_log.jsonl") if item.get("session_id") == session_id]
     execution = [item for item in read_jsonl(paths.logs_dir / "execution_log.jsonl") if item.get("session_id") == session_id]
-    learning = [
-        item
-        for item in read_jsonl(paths.logs_dir / "learning_log.jsonl")
-        if item.get("session_id") == session_id or _learning_record_matches_session(item, session_id)
-    ]
     capture_dir = paths.session_screenshot_path(session_id)
     captures = []
     if capture_dir.exists():
@@ -60,7 +54,6 @@ def load_session_detail(paths: WorkspacePaths, session_id: str) -> dict:
         "history": history,
         "audit": audit,
         "execution": execution,
-        "learning": learning,
         "captures": captures,
     }
 
@@ -82,10 +75,6 @@ def delete_session_thread(paths: WorkspacePaths, session_id: str) -> bool:
         paths.logs_dir / "execution_log.jsonl",
         lambda item: item.get("session_id") != session_id,
     )
-    removed |= _rewrite_jsonl(
-        paths.logs_dir / "learning_log.jsonl",
-        lambda item: item.get("session_id") != session_id and not _learning_record_matches_session(item, session_id),
-    )
 
     capture_dir = paths.session_screenshot_path(session_id)
     if capture_dir.exists():
@@ -96,57 +85,6 @@ def delete_session_thread(paths: WorkspacePaths, session_id: str) -> bool:
 
 
 def build_knowledge_items(paths: WorkspacePaths) -> dict[str, list[dict]]:
-    app_items = []
-    for path in sorted(paths.apps_dir.glob("*/app_profile.md")):
-        app_name = path.parent.name
-        app_items.append(
-            {
-                "id": f"app:{app_name}",
-                "name": friendly_app_name(app_name),
-                "target": friendly_app_name(app_name),
-                "updated_at": _format_timestamp(datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat()),
-                "kind": "app_profile",
-                "kind_label": friendly_knowledge_kind("app_profile"),
-                "status": tr("value.active"),
-                "summary": _summary_from_text(read_text(path)),
-                "detail_path": str(path),
-            }
-        )
-
-    task_items = []
-    for path in sorted(paths.tasks_dir.glob("*/task_recipe.md")):
-        task_name = path.parent.name
-        task_items.append(
-            {
-                "id": f"task:{task_name}",
-                "name": friendly_task_name(task_name),
-                "target": friendly_task_name(task_name),
-                "updated_at": _format_timestamp(datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat()),
-                "kind": "task_recipe",
-                "kind_label": friendly_knowledge_kind("task_recipe"),
-                "status": tr("value.active"),
-                "summary": _summary_from_text(read_text(path)),
-                "detail_path": str(path),
-            }
-        )
-
-    learning_items = []
-    for entry in reversed(read_jsonl(paths.logs_dir / "learning_log.jsonl", limit=200)):
-        record = entry.get("entry", {})
-        learning_items.append(
-            {
-                "id": record.get("id", ""),
-                "name": record.get("successful_action", "Observation pattern"),
-                "target": friendly_app_name(record.get("app", "")),
-                "updated_at": _format_timestamp(record.get("last_verified_at", "")),
-                "kind": "learning",
-                "kind_label": friendly_knowledge_kind("learning"),
-                "status": tr("value.active"),
-                "summary": record.get("expected_outcome", ""),
-                "detail_payload": entry,
-            }
-        )
-
     prompt_path = paths.users_dir / "default" / "user_custom_prompt.md"
     prompt_items = []
     if prompt_path.exists():
@@ -179,9 +117,6 @@ def build_knowledge_items(paths: WorkspacePaths) -> dict[str, list[dict]]:
         )
 
     return {
-        "app_knowledge": app_items,
-        "action_templates": task_items,
-        "learning_history": learning_items,
         "custom_prompt": prompt_items,
     }
 
@@ -227,11 +162,6 @@ def _decorate_history_record(record: dict) -> dict:
     enriched["display_result"] = friendly_result(str(enriched.get("result", "")))
     enriched["display_app"] = friendly_app_name(str(enriched.get("target_app", "")))
     return enriched
-
-
-def _learning_record_matches_session(record: dict, session_id: str) -> bool:
-    entry = record.get("entry", {})
-    return isinstance(entry, dict) and str(entry.get("source_session_id", "")) == session_id
 
 
 def _rewrite_jsonl(path, keep_record) -> bool:

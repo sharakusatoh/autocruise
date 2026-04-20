@@ -17,7 +17,7 @@ Use it at your own risk. Please verify important operations yourself before rely
 - Structured automation first: UIA -> Win32 input -> optional Playwright/CDP -> vision fallback
 - Desktop-oriented UI built with PySide6
 - Manual and scheduled execution support
-- Prompt, app knowledge, and task template files stored as plain text assets
+- Prompt files stored as plain text assets: constitution, selected system prompt, and custom instructions
 
 ## Repository Scope
 
@@ -116,7 +116,7 @@ Typical release outputs:
 
 ## Included Prompt Assets
 
-The repository includes default constitution, app knowledge, task templates, and system prompt assets used by AutoCruise CE.
+The repository includes the default constitution, bundled system prompts, and custom instruction assets used by AutoCruise CE. These are the only bundled prompt asset categories loaded into the model context in this edition.
 
 Additional background on the bundled system prompts is available here:
 
@@ -138,7 +138,7 @@ The source repository includes:
 - `src/` for the application code
 - `tests/` for automated tests
 - `docs/` for architecture, prompt library, and release QA notes
-- `apps/`, `tasks/`, `constitution/`, and `users/default/systemprompt/` for bundled knowledge and prompt assets
+- `constitution/`, `users/default/systemprompt/`, and `users/default/custom_prompts/` for bundled prompt assets
 - `build_windows.bat` and `AutoCruise.spec` for Windows packaging
 
 The source repository does not include:

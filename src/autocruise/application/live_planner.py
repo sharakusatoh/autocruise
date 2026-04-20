@@ -81,10 +81,22 @@ class LiveActionPlanner:
                 instructions=self._build_instructions(goal, retrieved_context),
                 prompt=self._build_prompt(goal, observation, recent_actions, retrieved_context, planning_meta),
                 image_path=self._image_for_observation(observation),
-                session_key=str(planning_meta.get("session_id", "")).strip() or None,
+                session_key=None,
                 output_schema=self._output_schema(),
             )
             plan = self._parse_plan(response_text)
+            repaired = self._repair_editor_wait(
+                goal,
+                observation,
+                recent_actions,
+                retrieved_context,
+                planning_meta,
+                settings,
+                api_key,
+                plan,
+            )
+            if repaired is not None:
+                plan = repaired
             self._last_notice = ""
             return plan
         except ProviderError as exc:
@@ -124,6 +136,8 @@ class LiveActionPlanner:
             "Use target.backend_hint only when you have a clear preference such as uia, playwright, or cdp. Otherwise leave it empty. "
             "If the goal is to write text in Notepad or another editor and that editor window is already visible, do not wait. "
             "Return type_text immediately, or click once inside the editor and then type_text on the next step. "
+            "When editor_window_visible is true and save_dialog_visible is false, a wait action is usually wrong. "
+            "Choose click or type_text unless the application is visibly blocked. "
             "If the latest action already wrote the requested text into the active editor, do not type the same text again. "
             "Move to the next missing step such as saving or completing the task. "
             "If repeat_guard.avoid_signature is set, do not repeat that same action signature unless the UI materially changed. "
@@ -442,6 +456,123 @@ class LiveActionPlanner:
             if term.casefold() in evidence:
                 return True
         return False
+
+    def _repair_editor_wait(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        context: RetrievedContext | None,
+        planning_meta: dict[str, Any],
+        settings,
+        api_key: str,
+        plan: PlanStep,
+    ) -> PlanStep | None:
+        action = plan.action
+        if action is None or action.type != ActionType.WAIT:
+            return None
+        if not self._looks_like_text_authoring_goal(goal, context):
+            return None
+        if not self._editor_window_visible(observation):
+            return None
+
+        try:
+            response_text = self.provider_registry.get(settings.provider).generate_text(
+                settings=settings,
+                api_key=api_key,
+                instructions=self._build_editor_repair_instructions(),
+                prompt=self._build_editor_repair_prompt(goal, observation, recent_actions, context, planning_meta, plan),
+                image_path=self._image_for_observation(observation),
+                session_key=None,
+                output_schema=self._output_schema(),
+            )
+            repaired = self._parse_plan(response_text)
+            repaired_action = repaired.action
+            if repaired.is_complete or (repaired_action is not None and repaired_action.type != ActionType.WAIT):
+                return repaired
+        except ProviderError:
+            return None
+        except Exception:
+            return None
+        return None
+
+    def _build_editor_repair_instructions(self) -> str:
+        return (
+            "You are repairing a bad desktop action plan. "
+            "The previous plan returned wait while an editor task is already active. "
+            "That wait is invalid unless the UI is genuinely blocked. "
+            "Return exactly one next action or completion. "
+            "Do not reopen the app, do not refocus the same window again, and do not return wait. "
+            "Use click to place the caret, type_text to write content, and hotkey for Ctrl+S or Enter when saving. "
+            "If requested_text is empty, infer a concise, goal-aligned text draft from the goal and place it in action.text. "
+            "If the text is already in the editor and save_requested is true, return hotkey Ctrl+S. "
+            "If save_dialog_visible is true, type save_path_hint into the file name field or press Enter if the path is already present. "
+            "Return only valid JSON matching the provided output schema."
+        )
+
+    def _build_editor_repair_prompt(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        context: RetrievedContext | None,
+        planning_meta: dict[str, Any],
+        plan: PlanStep,
+    ) -> str:
+        requested_text = self._extract_requested_text(goal)
+        save_requested = self._save_requested(goal, context)
+        save_dialog_visible = self._save_dialog_visible(observation)
+        save_path_hint = self._save_path_hint(goal) if save_requested else ""
+        last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
+        recent_payload = []
+        for item in recent_actions[-4:]:
+            recent_payload.append(
+                {
+                    "type": item.type.value,
+                    "target": item.target.name or item.target.window_title,
+                    "text": item.text[:400],
+                    "hotkey": item.hotkey,
+                    "expected_outcome": item.expected_outcome,
+                }
+            )
+        return json.dumps(
+            {
+                "goal": goal,
+                "repair_reason": "The previous planner output chose wait for an active editor task.",
+                "requested_text": requested_text,
+                "text_authoring_goal": self._looks_like_text_authoring_goal(goal, context),
+                "save_requested": save_requested,
+                "save_dialog_visible": save_dialog_visible,
+                "save_path_hint": save_path_hint,
+                "active_window": observation.active_window.title if observation.active_window else "",
+                "focused_element": observation.focused_element,
+                "ui_summary": observation.ui_tree_summary[:700],
+                "textual_hints": observation.textual_hints[:6],
+                "detected_elements": [
+                    {
+                        "name": item.name,
+                        "automation_id": item.automation_id,
+                        "control_type": item.control_type,
+                        "bounds": asdict(item.bounds) if item.bounds else None,
+                    }
+                    for item in observation.detected_elements[:8]
+                ],
+                "repeat_guard": planning_meta.get("repeat_guard", {}),
+                "recent_actions": recent_payload,
+                "previous_plan": {
+                    "summary": plan.summary,
+                    "reasoning": plan.reasoning,
+                    "action_type": plan.action.type.value if plan.action else "",
+                    "action_reason": plan.action.reason if plan.action else "",
+                },
+                "last_action_result": {
+                    "success": bool(last_execution.get("success", False)),
+                    "details": str(last_execution.get("details", ""))[:400],
+                    "error": str(last_execution.get("error", ""))[:300],
+                },
+            },
+            ensure_ascii=False,
+        )
 
     def _parse_plan(self, response_text: str) -> PlanStep:
         payload = self._extract_json(response_text)

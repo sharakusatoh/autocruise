@@ -14,8 +14,6 @@ from autocruise.domain.models import (
     CompletedData,
     ExecutingData,
     FailedData,
-    LearningEntry,
-    LearningUpdateData,
     LoadingContextData,
     ObservingData,
     PausedData,
@@ -62,9 +60,7 @@ class AgentToolset(Protocol):
     def execute_action(self, action: Action): ...
     def wait_for_expected_change(self, session_id: str, action: Action, previous_observation, *, recent_actions: list[str] | None = None, execution_result=None): ...
     def validate_outcome(self, expected_outcome: str, observation, previous_observation=None, action: Action | None = None): ...
-    def update_memory(self, entry: LearningEntry) -> None: ...
     def abort_session(self, reason: str) -> None: ...
-    def build_learning_entry(self, session_id: str, action: Action, observation, app_name: str, task_name: str = "") -> LearningEntry: ...
 
 
 class SessionOrchestrator:
@@ -142,7 +138,6 @@ class SessionOrchestrator:
             failure_counts: dict[str, int] = {}
             step_count = 0
             confirmation_notes: list[str] = []
-            learning_updates = 0
             allow_postcheck_observation_reuse = bool(getattr(toolset, "reuse_postcheck_observation", True))
             reuse_postcheck_observation = False
 
@@ -152,10 +147,16 @@ class SessionOrchestrator:
                         self._stop(snapshot, "User requested stop"),
                         step_count,
                         confirmation_notes,
-                        learning_updates,
                     )
 
                 if allow_postcheck_observation_reuse and reuse_postcheck_observation and snapshot.current_observation is not None:
+                    if snapshot.state == SessionState.REPLANNING:
+                        snapshot = self._transition(
+                            snapshot,
+                            SessionState.OBSERVING,
+                            ObservingData(reason="Reuse the latest observation while replanning"),
+                            "Reuse current observation for replanning",
+                        )
                     observation = snapshot.current_observation
                     reuse_postcheck_observation = False
                 else:
@@ -174,7 +175,7 @@ class SessionOrchestrator:
                     )
                     snapshot.current_observation = observation
                     self._emit("observation", {"observation": observation})
-                    stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                    stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                     if stopped is not None:
                         return stopped
 
@@ -207,14 +208,12 @@ class SessionOrchestrator:
                         self._complete(snapshot, plan.completion_reason or plan.summary),
                         step_count,
                         confirmation_notes,
-                        learning_updates,
                     )
                 if not plan.action:
                     return self._finalize_history(
                         self._fail(snapshot, "Planner returned no action"),
                         step_count,
                         confirmation_notes,
-                        learning_updates,
                     )
 
                 action = plan.action
@@ -229,7 +228,6 @@ class SessionOrchestrator:
                             self._fail(snapshot, repeat_reason),
                             step_count,
                             confirmation_notes,
-                            learning_updates,
                         )
                     replans += 1
                     snapshot = self._transition(
@@ -243,7 +241,7 @@ class SessionOrchestrator:
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
                     continue
-                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                 if stopped is not None:
                     return stopped
 
@@ -281,9 +279,8 @@ class SessionOrchestrator:
                         self._fail(snapshot, f"Repeated target verification failure: {verification.reason}"),
                         step_count,
                         confirmation_notes,
-                        learning_updates,
                     )
-                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                 if stopped is not None:
                     return stopped
 
@@ -304,7 +301,6 @@ class SessionOrchestrator:
                             self._fail(snapshot, failure_reason),
                             step_count,
                             confirmation_notes,
-                            learning_updates,
                         )
                     replans += 1
                     snapshot = self._transition(
@@ -318,7 +314,7 @@ class SessionOrchestrator:
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
                     continue
-                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                 if stopped is not None:
                     return stopped
 
@@ -361,7 +357,6 @@ class SessionOrchestrator:
                             self._fail(snapshot, f"Validation failed after replanning: {validation.details}"),
                             step_count,
                             confirmation_notes,
-                            learning_updates,
                         )
                     replans += 1
                     snapshot = self._transition(
@@ -375,7 +370,7 @@ class SessionOrchestrator:
                     snapshot.retrieved_context = context
                     self._log_retrieval(session_id, context)
                     continue
-                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes, learning_updates)
+                stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                 if stopped is not None:
                     return stopped
 
@@ -387,43 +382,23 @@ class SessionOrchestrator:
                 failure_counts.clear()
                 reuse_postcheck_observation = allow_postcheck_observation_reuse
 
-                app_name = (
-                    snapshot.retrieved_context.app_candidates[0]
-                    if snapshot.retrieved_context and snapshot.retrieved_context.app_candidates
-                    else "general"
-                )
-                task_name = (
-                    snapshot.retrieved_context.task_candidates[0]
-                    if snapshot.retrieved_context and snapshot.retrieved_context.task_candidates
-                    else ""
-                )
-                learning_entry = toolset.build_learning_entry(
-                    session_id,
-                    action,
-                    postcheck_observation,
-                    app_name,
-                    task_name,
-                )
-                snapshot = self._transition(
-                    snapshot,
-                    SessionState.LEARNING_UPDATE,
-                    LearningUpdateData(entries=1),
-                    "Append learning memory",
-                )
-                toolset.update_memory(learning_entry)
-                self.logger.learning({"session_id": session_id, "entry": asdict(learning_entry)})
-                learning_updates += 1
+                if reuse_postcheck_observation:
+                    snapshot = self._transition(
+                        snapshot,
+                        SessionState.OBSERVING,
+                        ObservingData(reason="Use postcheck observation for the next plan"),
+                        "Use postcheck observation for next planning step",
+                    )
                 if max_steps is not None and step_count >= max_steps:
                     return self._finalize_history(
                         self._stop(snapshot, "最大ステップ数に達したため停止しました。"),
                         step_count,
                         confirmation_notes,
-                        learning_updates,
                     )
         except InvalidStateTransition as exc:
-            return self._finalize_history(self._fail(snapshot, str(exc)), 0, [], 0)
+            return self._finalize_history(self._fail(snapshot, str(exc)), 0, [])
         except Exception as exc:  # noqa: BLE001
-            return self._finalize_history(self._fail(snapshot, str(exc)), 0, [], 0)
+            return self._finalize_history(self._fail(snapshot, str(exc)), 0, [])
         finally:
             self._active_toolset = None
 
@@ -511,7 +486,6 @@ class SessionOrchestrator:
         snapshot: SessionSnapshot,
         step_count: int,
         confirmation_notes: list[str],
-        learning_updates: int,
     ) -> SessionSnapshot | None:
         if not self._stop_requested:
             return None
@@ -519,7 +493,6 @@ class SessionOrchestrator:
             self._stop(snapshot, "User requested stop"),
             step_count,
             confirmation_notes,
-            learning_updates,
         )
 
     def _resume_payload(self, resume_target: SessionState, summary: str):
@@ -576,6 +549,7 @@ class SessionOrchestrator:
             ActionType.HOTKEY,
             ActionType.FOCUS_WINDOW,
             ActionType.SHELL_EXECUTE,
+            ActionType.WAIT,
         }:
             return ""
         if not self._observation_is_stable(observation):
@@ -635,7 +609,6 @@ class SessionOrchestrator:
         snapshot: SessionSnapshot,
         step_count: int,
         confirmation_notes: list[str],
-        learning_updates: int,
     ) -> SessionSnapshot:
         result_map = {
             SessionState.COMPLETED: "success",
@@ -667,10 +640,8 @@ class SessionOrchestrator:
                 "message": message,
                 "failure_reason": getattr(snapshot.payload, "reason", ""),
                 "important_confirmations": confirmation_notes,
-                "used_knowledge": [item.path for item in context.selections] if context else [],
+                "used_context": [item.path for item in context.selections] if context else [],
                 "saved_captures": captures,
-                "learning_updated": learning_updates > 0,
-                "learning_update_count": learning_updates,
                 "flow": [item.to_state.value for item in snapshot.transitions],
             }
         )

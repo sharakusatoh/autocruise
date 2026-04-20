@@ -68,7 +68,7 @@ def include_tree(relative_root: str) -> list[tuple[str, str]]:
 
 
 datas: list[tuple[str, str]] = []
-for folder_name in ("constitution", "apps", "tasks", "docs", "users/default/systemprompt"):
+for folder_name in ("constitution", "docs", "users/default/systemprompt", "users/default/custom_prompts"):
     datas.extend(include_tree(folder_name))
 
 for relative_file in (

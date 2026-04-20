@@ -53,7 +53,7 @@ ALLOWED_TRANSITIONS: dict[SessionState, set[SessionState]] = {
         SessionState.FAILED,
     },
     SessionState.POSTCHECK: {
-        SessionState.LEARNING_UPDATE,
+        SessionState.OBSERVING,
         SessionState.REPLANNING,
         SessionState.COMPLETED,
         SessionState.PAUSED,
@@ -62,13 +62,6 @@ ALLOWED_TRANSITIONS: dict[SessionState, set[SessionState]] = {
     },
     SessionState.REPLANNING: {
         SessionState.OBSERVING,
-        SessionState.STOPPED,
-        SessionState.FAILED,
-    },
-    SessionState.LEARNING_UPDATE: {
-        SessionState.OBSERVING,
-        SessionState.PLANNING,
-        SessionState.COMPLETED,
         SessionState.STOPPED,
         SessionState.FAILED,
     },
