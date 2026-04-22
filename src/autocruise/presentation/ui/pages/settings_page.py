@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from autocruise.infrastructure.storage import MAX_STEPS_LIMIT_MAX, MAX_STEPS_LIMIT_MIN
 from autocruise.infrastructure.windows.global_hotkeys import HOTKEY_OPTIONS
 from autocruise.presentation.labels import tr
 from autocruise.presentation.ui.components import AppButton, AppComboBox, AppLineEdit, Card, SectionHeader, ThinScrollBar
@@ -70,49 +68,38 @@ class SettingsPage(QWidget):
         self._populate_autonomy_combo()
         general_layout.addWidget(self.autonomy_combo, 2, 1)
 
-        self.max_steps_label = QLabel(tr("label.max_steps"))
-        self.max_steps_label.setProperty("role", "body")
-        general_layout.addWidget(self.max_steps_label, 3, 0)
-        self.max_steps_edit = AppLineEdit()
-        self.max_steps_edit.setClearButtonEnabled(True)
-        self.max_steps_edit.setValidator(QIntValidator(MAX_STEPS_LIMIT_MIN, MAX_STEPS_LIMIT_MAX, self.max_steps_edit))
-        self.max_steps_edit.setPlaceholderText(tr("value.unlimited"))
-        self.max_steps_edit.setToolTip(tr("message.max_steps_hint"))
-        general_layout.addWidget(self.max_steps_edit, 3, 1)
-
         self.pause_hotkey_label = QLabel(tr("label.pause_hotkey"))
         self.pause_hotkey_label.setProperty("role", "body")
-        general_layout.addWidget(self.pause_hotkey_label, 4, 0)
+        general_layout.addWidget(self.pause_hotkey_label, 3, 0)
         self.pause_hotkey_combo = AppComboBox()
         self._populate_hotkey_combo(self.pause_hotkey_combo)
-        general_layout.addWidget(self.pause_hotkey_combo, 4, 1)
+        general_layout.addWidget(self.pause_hotkey_combo, 3, 1)
 
         self.stop_hotkey_label = QLabel(tr("label.stop_hotkey"))
         self.stop_hotkey_label.setProperty("role", "body")
-        general_layout.addWidget(self.stop_hotkey_label, 5, 0)
+        general_layout.addWidget(self.stop_hotkey_label, 4, 0)
         self.stop_hotkey_combo = AppComboBox()
         self._populate_hotkey_combo(self.stop_hotkey_combo)
-        general_layout.addWidget(self.stop_hotkey_combo, 5, 1)
+        general_layout.addWidget(self.stop_hotkey_combo, 4, 1)
 
         self.system_prompt_label = QLabel(tr("label.system_prompt"))
         self.system_prompt_label.setProperty("role", "body")
-        general_layout.addWidget(self.system_prompt_label, 6, 0)
+        general_layout.addWidget(self.system_prompt_label, 5, 0)
         self.system_prompt_combo = AppComboBox()
-        general_layout.addWidget(self.system_prompt_combo, 6, 1)
+        general_layout.addWidget(self.system_prompt_combo, 5, 1)
         self.system_prompt_actions = QHBoxLayout()
         self.system_prompt_actions.setContentsMargins(0, 0, 0, 0)
         self.system_prompt_actions.setSpacing(8)
+        self.general_save = AppButton(tr("button.save"), "primary")
         self.system_prompt_new = AppButton(tr("button.new"), "secondary")
         self.system_prompt_edit = AppButton(tr("button.edit"), "secondary")
         self.system_prompt_open_folder = AppButton(tr("button.open_folder"), "ghost")
+        self.system_prompt_actions.addWidget(self.general_save)
         self.system_prompt_actions.addWidget(self.system_prompt_new)
         self.system_prompt_actions.addWidget(self.system_prompt_edit)
         self.system_prompt_actions.addWidget(self.system_prompt_open_folder)
         self.system_prompt_actions.addStretch(1)
-        general_layout.addLayout(self.system_prompt_actions, 7, 0, 1, 2)
-
-        self.general_save = AppButton(tr("button.save"), "primary")
-        general_layout.addWidget(self.general_save, 8, 0, 1, 2, Qt.AlignLeft)
+        general_layout.addLayout(self.system_prompt_actions, 6, 0, 1, 2)
         content_layout.addWidget(self.general_card)
 
         self.ai_card = Card()
@@ -245,9 +232,14 @@ class SettingsPage(QWidget):
         self.storage_save = AppButton(tr("button.save"), "primary")
         self.purge_button = AppButton(tr("button.cleanup"), "secondary")
         self.open_screenshots_button = AppButton(tr("button.open_screenshots"), "secondary")
-        storage_layout.addWidget(self.storage_save, 4, 0, Qt.AlignLeft)
-        storage_layout.addWidget(self.purge_button, 4, 1, Qt.AlignLeft)
-        storage_layout.addWidget(self.open_screenshots_button, 5, 0, Qt.AlignLeft)
+        self.storage_actions = QHBoxLayout()
+        self.storage_actions.setContentsMargins(0, 0, 0, 0)
+        self.storage_actions.setSpacing(8)
+        self.storage_actions.addWidget(self.storage_save)
+        self.storage_actions.addWidget(self.open_screenshots_button)
+        self.storage_actions.addWidget(self.purge_button)
+        self.storage_actions.addStretch(1)
+        storage_layout.addLayout(self.storage_actions, 4, 0, 1, 2)
         content_layout.addWidget(self.storage_card)
         content_layout.addStretch(1)
 
@@ -382,14 +374,15 @@ class SettingsPage(QWidget):
     ) -> None:
         self.language_combo.setCurrentIndex(self._find_index(self.language_combo, language))
         self.autonomy_combo.setCurrentIndex(self._find_index(self.autonomy_combo, autonomy_mode))
-        self.max_steps_edit.setText("" if max_steps is None else str(max_steps))
         self.pause_hotkey_combo.setCurrentIndex(self._find_index(self.pause_hotkey_combo, pause_hotkey))
         self.stop_hotkey_combo.setCurrentIndex(self._find_index(self.stop_hotkey_combo, stop_hotkey))
+        self.system_prompt_combo.blockSignals(True)
         self.system_prompt_combo.clear()
         self.system_prompt_combo.addItem(tr("value.none"), "")
         for option in system_prompt_options or []:
             self.system_prompt_combo.addItem(option, option)
         self.system_prompt_combo.setCurrentIndex(self._find_index(self.system_prompt_combo, selected_system_prompt))
+        self.system_prompt_combo.blockSignals(False)
         self.system_prompt_edit.setEnabled(bool(self.system_prompt_combo.currentData()))
 
     def set_codex_values(
@@ -458,12 +451,11 @@ class SettingsPage(QWidget):
         self.limit_edit.setText(str(history_limit))
 
     def general_payload(self) -> dict:
-        max_steps = self._safe_optional_int(self.max_steps_edit.text(), MAX_STEPS_LIMIT_MIN, MAX_STEPS_LIMIT_MAX)
         return {
             "language": self.language_combo.currentData() or "en",
             "autonomy_mode": self.autonomy_combo.currentData() or "autonomous",
-            "max_steps_limit_enabled": max_steps is not None,
-            "max_steps_per_session": max_steps,
+            "max_steps_limit_enabled": False,
+            "max_steps_per_session": None,
             "pause_hotkey": self.pause_hotkey_combo.currentData() or "",
             "stop_hotkey": self.stop_hotkey_combo.currentData() or "",
             "selected_system_prompt": self.system_prompt_combo.currentData() or "",
@@ -491,16 +483,6 @@ class SettingsPage(QWidget):
             parsed = fallback
         return max(minimum, min(maximum, parsed))
 
-    def _safe_optional_int(self, value: str, minimum: int, maximum: int) -> int | None:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = int(text)
-        except ValueError:
-            return None
-        return max(minimum, min(maximum, parsed))
-
     def retranslate(self) -> None:
         selected_language = self.language_combo.currentData() or "en"
         selected_autonomy = self.autonomy_combo.currentData() or "autonomous"
@@ -513,8 +495,6 @@ class SettingsPage(QWidget):
         self.language_combo.setCurrentIndex(self._find_index(self.language_combo, selected_language))
         self._populate_autonomy_combo()
         self.autonomy_combo.setCurrentIndex(self._find_index(self.autonomy_combo, selected_autonomy))
-        self.max_steps_edit.setPlaceholderText(tr("value.unlimited"))
-        self.max_steps_edit.setToolTip(tr("message.max_steps_hint"))
         self._populate_hotkey_combo(self.pause_hotkey_combo)
         self.pause_hotkey_combo.setCurrentIndex(self._find_index(self.pause_hotkey_combo, selected_pause_hotkey))
         self._populate_hotkey_combo(self.stop_hotkey_combo)
@@ -529,7 +509,6 @@ class SettingsPage(QWidget):
         self.general_header.set_text(tr("label.general"), tr("settings.general_subtitle"))
         self.language_label.setText(tr("label.language"))
         self.autonomy_label.setText(tr("label.autonomy"))
-        self.max_steps_label.setText(tr("label.max_steps"))
         self.pause_hotkey_label.setText(tr("label.pause_hotkey"))
         self.stop_hotkey_label.setText(tr("label.stop_hotkey"))
         self.system_prompt_label.setText(tr("label.system_prompt"))

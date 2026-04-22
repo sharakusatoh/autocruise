@@ -33,13 +33,8 @@ from autocruise.infrastructure.storage import (
     ScreenshotRetentionService,
     WorkspacePaths,
     load_structured,
-    normalize_max_steps_preference,
 )
 
-MAX_STEPS_DEFAULT: int | None = None
-MAX_REPLANS_PER_STEP = 4
-MAX_REPEAT_FAILURES = 2
-MAX_PRECHECK_MISMATCHES = 3
 CAPTURE_SUFFIXES = {".png", ".ppm", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
@@ -108,7 +103,6 @@ class SessionOrchestrator:
 
         try:
             preferences = load_structured(self.paths.preferences_path())
-            _max_steps_limit_enabled, max_steps = normalize_max_steps_preference(preferences)
             autonomy_mode = str(preferences.get("autonomy_mode", "autonomous") or "autonomous")
             self.retention.purge(
                 default_ttl_days=int(preferences.get("screenshot_ttl_days", 3)),
@@ -132,10 +126,8 @@ class SessionOrchestrator:
             self._log_retrieval(session_id, context)
 
             recent_actions: list[Action] = []
-            minor_failures = 0
             replans = 0
             last_failure_reason = ""
-            failure_counts: dict[str, int] = {}
             step_count = 0
             confirmation_notes: list[str] = []
             allow_postcheck_observation_reuse = bool(getattr(toolset, "reuse_postcheck_observation", True))
@@ -193,9 +185,7 @@ class SessionOrchestrator:
                         snapshot.session_id,
                         snapshot.retrieved_context,
                         step_count,
-                        max_steps,
                         last_failure_reason,
-                        failure_counts,
                         autonomy_mode,
                         recent_actions,
                         observation,
@@ -219,28 +209,6 @@ class SessionOrchestrator:
                 action = plan.action
                 snapshot.last_action = action
                 snapshot.summary = plan.summary
-                repeat_reason = self._detect_repeated_action_without_progress(action, recent_actions, snapshot.current_observation)
-                if repeat_reason:
-                    failure_count = self._record_failure(failure_counts, repeat_reason)
-                    last_failure_reason = repeat_reason
-                    if replans >= MAX_REPLANS_PER_STEP or failure_count > MAX_REPEAT_FAILURES:
-                        return self._finalize_history(
-                            self._fail(snapshot, repeat_reason),
-                            step_count,
-                            confirmation_notes,
-                        )
-                    replans += 1
-                    snapshot = self._transition(
-                        snapshot,
-                        SessionState.REPLANNING,
-                        ReplanningData(failure_reason=repeat_reason, attempt=replans),
-                        "Repeated action without new progress; replanning",
-                    )
-                    reuse_postcheck_observation = True
-                    context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=repeat_reason)
-                    snapshot.retrieved_context = context
-                    self._log_retrieval(session_id, context)
-                    continue
                 stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                 if stopped is not None:
                     return stopped
@@ -255,31 +223,19 @@ class SessionOrchestrator:
                 precheck_observation = snapshot.current_observation
                 verification = toolset.verify_target(action, precheck_observation)
                 if not verification.matched:
-                    failure_count = self._record_failure(failure_counts, verification.reason)
-                    minor_failures += 1
                     last_failure_reason = verification.reason
-                    if (
-                        minor_failures <= MAX_PRECHECK_MISMATCHES
-                        and replans < MAX_REPLANS_PER_STEP
-                        and failure_count <= MAX_REPEAT_FAILURES
-                    ):
-                        replans += 1
-                        snapshot = self._transition(
-                            snapshot,
-                            SessionState.REPLANNING,
-                            ReplanningData(failure_reason=verification.reason, attempt=replans),
-                            "Precheck failed; replanning",
-                        )
-                        reuse_postcheck_observation = False
-                        context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=verification.reason)
-                        snapshot.retrieved_context = context
-                        self._log_retrieval(session_id, context)
-                        continue
-                    return self._finalize_history(
-                        self._fail(snapshot, f"Repeated target verification failure: {verification.reason}"),
-                        step_count,
-                        confirmation_notes,
+                    replans += 1
+                    snapshot = self._transition(
+                        snapshot,
+                        SessionState.REPLANNING,
+                        ReplanningData(failure_reason=verification.reason, attempt=replans),
+                        "Precheck failed; replanning",
                     )
+                    reuse_postcheck_observation = False
+                    context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=verification.reason)
+                    snapshot.retrieved_context = context
+                    self._log_retrieval(session_id, context)
+                    continue
                 stopped = self._stop_if_requested(snapshot, step_count, confirmation_notes)
                 if stopped is not None:
                     return stopped
@@ -294,14 +250,7 @@ class SessionOrchestrator:
                 execution = toolset.execute_action(action)
                 if not execution.success:
                     failure_reason = execution.error or execution.details
-                    failure_count = self._record_failure(failure_counts, failure_reason)
                     last_failure_reason = failure_reason
-                    if replans >= MAX_REPLANS_PER_STEP or failure_count > MAX_REPEAT_FAILURES:
-                        return self._finalize_history(
-                            self._fail(snapshot, failure_reason),
-                            step_count,
-                            confirmation_notes,
-                        )
                     replans += 1
                     snapshot = self._transition(
                         snapshot,
@@ -350,14 +299,7 @@ class SessionOrchestrator:
                 )
 
                 if not validation.success:
-                    failure_count = self._record_failure(failure_counts, validation.details)
                     last_failure_reason = validation.details
-                    if replans >= MAX_REPLANS_PER_STEP or failure_count > MAX_REPEAT_FAILURES:
-                        return self._finalize_history(
-                            self._fail(snapshot, f"Validation failed after replanning: {validation.details}"),
-                            step_count,
-                            confirmation_notes,
-                        )
                     replans += 1
                     snapshot = self._transition(
                         snapshot,
@@ -376,10 +318,8 @@ class SessionOrchestrator:
 
                 recent_actions.append(action)
                 step_count += 1
-                minor_failures = 0
                 replans = 0
                 last_failure_reason = ""
-                failure_counts.clear()
                 reuse_postcheck_observation = allow_postcheck_observation_reuse
 
                 if reuse_postcheck_observation:
@@ -388,12 +328,6 @@ class SessionOrchestrator:
                         SessionState.OBSERVING,
                         ObservingData(reason="Use postcheck observation for the next plan"),
                         "Use postcheck observation for next planning step",
-                    )
-                if max_steps is not None and step_count >= max_steps:
-                    return self._finalize_history(
-                        self._stop(snapshot, "最大ステップ数に達したため停止しました。"),
-                        step_count,
-                        confirmation_notes,
                     )
         except InvalidStateTransition as exc:
             return self._finalize_history(self._fail(snapshot, str(exc)), 0, [])
@@ -507,89 +441,20 @@ class SessionOrchestrator:
         session_id: str,
         retrieved_context,
         step_count: int,
-        max_steps: int | None,
         last_failure_reason: str,
-        failure_counts: dict[str, int],
         autonomy_mode: str,
         recent_actions: list[Action] | None = None,
         observation=None,
     ) -> dict[str, object]:
-        repeat_guard = self._repeat_guard_payload(recent_actions or [], observation)
         return {
             "session_id": session_id,
             "retrieved_context": retrieved_context,
             "autopilot_mode": True,
             "autonomy_mode": autonomy_mode,
             "step_count": step_count,
-            "remaining_steps": max(max_steps - step_count, 0) if max_steps is not None else None,
             "recent_failure_reason": last_failure_reason,
-            "recent_failure_count": failure_counts.get(last_failure_reason, 0) if last_failure_reason else 0,
-            "repeat_guard": repeat_guard,
-            "confirmation_policy": "Do not ask the user. Keep progressing and finish the task unless the desktop is genuinely blocked.",
+            "confirmation_policy": "Use autonomous judgment and keep progressing until the task is complete.",
         }
-
-    def _repeat_guard_payload(self, recent_actions: list[Action], observation) -> dict[str, object]:
-        last_signature = self._action_signature(recent_actions[-1]) if recent_actions else ""
-        previous_signature = self._action_signature(recent_actions[-2]) if len(recent_actions) >= 2 else ""
-        stable = self._observation_is_stable(observation)
-        return {
-            "last_action_signature": last_signature,
-            "previous_action_signature": previous_signature,
-            "repeat_streak": 2 if last_signature and last_signature == previous_signature else (1 if last_signature else 0),
-            "observation_stable": stable,
-            "avoid_signature": last_signature if stable and last_signature else "",
-        }
-
-    def _detect_repeated_action_without_progress(self, action: Action, recent_actions: list[Action], observation) -> str:
-        if not recent_actions or observation is None:
-            return ""
-        if action.type not in {
-            ActionType.CLICK,
-            ActionType.TYPE_TEXT,
-            ActionType.HOTKEY,
-            ActionType.FOCUS_WINDOW,
-            ActionType.SHELL_EXECUTE,
-            ActionType.WAIT,
-        }:
-            return ""
-        if not self._observation_is_stable(observation):
-            return ""
-        current_signature = self._action_signature(action)
-        if not current_signature:
-            return ""
-        if current_signature != self._action_signature(recent_actions[-1]):
-            return ""
-        return f"Repeated action without new progress: {current_signature}"
-
-    def _observation_is_stable(self, observation) -> bool:
-        if observation is None or not isinstance(getattr(observation, "raw_ref", None), dict):
-            return False
-        raw_ref = observation.raw_ref
-        change_summary = str(raw_ref.get("change_summary", "")).strip().lower()
-        planner_skip_reason = str(raw_ref.get("planner_skip_reason", "")).strip().lower()
-        if planner_skip_reason == "sensor_unchanged":
-            return True
-        return change_summary in {"", "no structured changes.", "no structured changes"}
-
-    def _action_signature(self, action: Action | None) -> str:
-        if action is None:
-            return ""
-        target = action.target.automation_id or action.target.name or action.target.window_title
-        parts = [action.type.value, str(target or "").strip().lower()]
-        if action.type == ActionType.TYPE_TEXT:
-            parts.append(str(action.text or "").strip())
-        elif action.type == ActionType.HOTKEY:
-            parts.append(str(action.hotkey or "").strip().lower())
-        elif action.type == ActionType.SHELL_EXECUTE:
-            parts.append(str(action.shell_kind or "").strip().lower())
-            parts.append(str(action.shell_command or "").strip().lower())
-        return "|".join(parts)
-
-    def _record_failure(self, failure_counts: dict[str, int], reason: str) -> int:
-        if not reason:
-            return 0
-        failure_counts[reason] = failure_counts.get(reason, 0) + 1
-        return failure_counts[reason]
 
     def _log_retrieval(self, session_id: str, context) -> None:
         self.logger.audit(

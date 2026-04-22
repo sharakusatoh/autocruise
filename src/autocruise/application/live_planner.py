@@ -108,19 +108,18 @@ class LiveActionPlanner:
 
     def _build_instructions(self, goal: str, context: RetrievedContext | None) -> str:
         launch_hint = self._build_launch_hint(goal, context)
-        return (
+        base_instructions = (
             "You are the autopilot planner for a Windows desktop GUI agent. "
             "Return exactly one next action or declare completion. "
-            "Keep advancing toward the user's goal until it is visibly complete or truly blocked. "
-            "Use short strings to minimize tokens. "
-            "Do not stop early just because one step succeeded. "
-            "Do not ask the user for confirmation. Keep moving. "
+            "Keep advancing toward the user's goal until it is complete. "
+            "Continue after individual successful steps until the whole task is complete. "
+            "Act autonomously without requesting user confirmation. "
             "Always think at two levels: the overall objective route and the immediate next step. "
             "Treat browsers like any other Windows application. "
-            "If the requested app is not open, launch it immediately using the shortest reliable Windows path. "
+            "If the requested app is not open, launch it immediately using a reliable Windows path. "
             "For known Windows apps with a direct executable alias, prefer shell_execute with shell_kind process before using Win+R or Search. "
             f"{launch_hint}"
-            "Use Search only when Run or a visible launcher item is not enough. Do not bounce between opening and closing Search. "
+            "Use Search when Run or a visible launcher item is not enough, and keep progressing through the chosen launcher path. "
             "If one launcher path fails, switch to another direct path on the next step. "
             "If the app is starting, use wait only until the target UI is visible. "
             "Once the app is open, continue with the next concrete step such as selecting a tool, focusing a field, typing text, or drawing on a canvas. "
@@ -131,22 +130,20 @@ class LiveActionPlanner:
             "If shell_execute does not need a visible UI change, leave expected_signals empty and keep wait_timeout_ms short. "
             "If shell_execute should open an app window, use shell_kind process and set the target window title when you know it. "
             "If shell_cwd is empty, the command will run in the current AutoCruise workspace root. "
-            "Use type_text only for a focused or clearly editable field. Do not point type_text at buttons or launcher controls. "
-            "In target.search_terms, provide 1 to 4 short text cues that help resolve the target semantically when exact automation ids are unavailable. "
+            "For type_text, target a focused or clearly editable field. "
+            "In target.search_terms, provide 1 to 4 text cues that help resolve the target semantically when exact automation ids are unavailable. "
             "Use target.backend_hint only when you have a clear preference such as uia, playwright, or cdp. Otherwise leave it empty. "
-            "If the goal is to write text in Notepad or another editor and that editor window is already visible, do not wait. "
+            "If the goal is to write text in Notepad or another editor and that editor window is already visible, type_text is usually the best next action. "
             "Return type_text immediately, or click once inside the editor and then type_text on the next step. "
             "When editor_window_visible is true and save_dialog_visible is false, a wait action is usually wrong. "
-            "Choose click or type_text unless the application is visibly blocked. "
-            "If the latest action already wrote the requested text into the active editor, do not type the same text again. "
-            "Move to the next missing step such as saving or completing the task. "
-            "If repeat_guard.avoid_signature is set, do not repeat that same action signature unless the UI materially changed. "
-            "When a previous action already succeeded and the observation is stable, choose the next missing step instead of replaying the last one. "
+            "Choose click, type_text, hotkey, shell_execute, drag, scroll, or wait according to your own judgment. "
+            "Use recent actions as context, not as a prohibition. "
+            "When a previous action already succeeded, freely decide whether to repeat it, refine it, or move to the next missing step. "
             "If requested_text is present in the prompt payload, use it exactly. "
-            "If requested_text is empty but text_authoring_goal is true, infer the intended content from the goal itself and put a concise, goal-aligned draft in action.text. "
+            "If requested_text is empty but text_authoring_goal is true, infer the intended content from the goal itself and put a goal-aligned draft in action.text. "
             "If save_requested is true and the text is already in the editor, prefer Ctrl+S. "
             "If save_dialog_visible is true, enter save_path_hint into the file name field and confirm with Enter. "
-            "Do not declare completion for a save-requested editor task until the save dialog is gone or the editor clearly shows the saved file. "
+            "Declare completion for a save-requested editor task after the save dialog is gone or the editor clearly shows the saved file. "
             "After WIN+S opens Windows Search, assume the search field already has keyboard focus unless the screenshot clearly shows otherwise. "
             "Use hotkey for Enter, Tab, Escape, arrow keys, function keys, and modifier combinations. "
             "For drawing or painting tasks, think in vector-like strokes. "
@@ -167,7 +164,7 @@ class LiveActionPlanner:
             "If visual_guides are present, remember that screenshot pixel (0,0) maps to the reported screen origin, not always to global (0,0). "
             "Use the cursor marker and active-window bounds to estimate precise click, drag, and drawing coordinates. "
             "When screenshot input is unavailable, rely on the UI automation summary and textual hints instead. "
-            "If the sensor snapshot is unchanged, do not ask for a fresh image. Reuse the structured observation and keep moving. "
+            "If the sensor snapshot is unchanged, reuse the structured observation and keep moving. "
             "Always populate expected_signals with the cheapest observable UI changes for the chosen action. "
             "Prefer signals that UIA, Playwright, or CDP can verify before using vision_change. "
             "When screen_understanding.ui_candidates is present, prefer those numbered UI candidates before visual guessing. "
@@ -176,6 +173,16 @@ class LiveActionPlanner:
             "clearly labeled control, type into a visible edit field, use a launcher shortcut, scroll, or wait briefly. "
             "Prefer UI automation targets, labeled controls, shortcuts, visual hints, then coordinates. "
             "Return only valid JSON matching the provided output schema."
+        )
+        selected_prompt = self._selected_system_prompt_text(context)
+        if not selected_prompt:
+            return base_instructions
+        return (
+            f"{base_instructions}\n\n"
+            "User-selected system prompt from AutoCruiseCE Settings:\n"
+            "<selected_system_prompt>\n"
+            f"{selected_prompt}\n"
+            "</selected_system_prompt>"
         )
 
     def _build_launch_hint(self, goal: str, context: RetrievedContext | None) -> str:
@@ -200,12 +207,12 @@ class LiveActionPlanner:
             alias_text = ", ".join(f"{display} -> {command}" for display, command in relevant[:4])
             return (
                 f"For this task, use Win+R with these relevant aliases: {alias_text}. "
-                "Use only a relevant alias for this task. Do not type unrelated app names or commands. "
+                "Use a relevant alias for this task. "
             )
 
         return (
             "When a known Windows app is clearly requested, prefer Win+R with that app's own executable alias. "
-            "Do not type unrelated commands or unrelated app names. "
+            "Keep launcher input aligned with the user's requested app. "
         )
 
     def _goal_alias_candidates(self, goal: str) -> list[str]:
@@ -251,7 +258,6 @@ class LiveActionPlanner:
         last_execution = observation.raw_ref.get("last_execution", {}) if isinstance(observation.raw_ref, dict) else {}
         observation_kind = observation.raw_ref.get("observation_kind", ObservationKind.FULL.value) if isinstance(observation.raw_ref, dict) else ObservationKind.FULL.value
         change_summary = observation.raw_ref.get("change_summary", "") if isinstance(observation.raw_ref, dict) else ""
-        repeat_guard = planning_meta.get("repeat_guard", {}) if isinstance(planning_meta, dict) else {}
         requested_text = self._extract_requested_text(goal)
         text_authoring_goal = self._looks_like_text_authoring_goal(goal, context)
         editor_window_visible = self._editor_window_visible(observation)
@@ -278,19 +284,10 @@ class LiveActionPlanner:
                 "planning_style": "Maintain an overall route, choose the next best step, then re-observe.",
                 "confirmation_policy": planning_meta.get(
                     "confirmation_policy",
-                    "Do not ask the user. Keep executing until the goal is complete or blocked.",
+                    "Use autonomous judgment. Keep executing until the goal is complete.",
                 ),
                 "step_count": planning_meta.get("step_count", 0),
-                "remaining_step_budget": planning_meta.get("remaining_steps", 0),
                 "recent_failure_reason": planning_meta.get("recent_failure_reason", ""),
-                "recent_failure_count": planning_meta.get("recent_failure_count", 0),
-                "repeat_guard": {
-                    "last_action_signature": str(repeat_guard.get("last_action_signature", "")),
-                    "previous_action_signature": str(repeat_guard.get("previous_action_signature", "")),
-                    "repeat_streak": int(repeat_guard.get("repeat_streak", 0) or 0),
-                    "observation_stable": bool(repeat_guard.get("observation_stable", False)),
-                    "avoid_signature": str(repeat_guard.get("avoid_signature", "")),
-                },
                 "text_authoring_goal": text_authoring_goal,
                 "requested_text": requested_text,
                 "editor_window_visible": editor_window_visible,
@@ -480,7 +477,7 @@ class LiveActionPlanner:
             response_text = self.provider_registry.get(settings.provider).generate_text(
                 settings=settings,
                 api_key=api_key,
-                instructions=self._build_editor_repair_instructions(),
+                instructions=self._build_editor_repair_instructions(context),
                 prompt=self._build_editor_repair_prompt(goal, observation, recent_actions, context, planning_meta, plan),
                 image_path=self._image_for_observation(observation),
                 session_key=None,
@@ -496,18 +493,28 @@ class LiveActionPlanner:
             return None
         return None
 
-    def _build_editor_repair_instructions(self) -> str:
-        return (
+    def _build_editor_repair_instructions(self, context: RetrievedContext | None = None) -> str:
+        base_instructions = (
             "You are repairing a bad desktop action plan. "
             "The previous plan returned wait while an editor task is already active. "
-            "That wait is invalid unless the UI is genuinely blocked. "
+            "Use autonomous judgment to choose the next progress-making editor action. "
             "Return exactly one next action or completion. "
-            "Do not reopen the app, do not refocus the same window again, and do not return wait. "
+            "Reuse the current editor context when it is useful, or choose another action when that advances the goal. "
             "Use click to place the caret, type_text to write content, and hotkey for Ctrl+S or Enter when saving. "
-            "If requested_text is empty, infer a concise, goal-aligned text draft from the goal and place it in action.text. "
+            "If requested_text is empty, freely infer a goal-aligned text draft from the goal and place it in action.text. "
             "If the text is already in the editor and save_requested is true, return hotkey Ctrl+S. "
             "If save_dialog_visible is true, type save_path_hint into the file name field or press Enter if the path is already present. "
             "Return only valid JSON matching the provided output schema."
+        )
+        selected_prompt = self._selected_system_prompt_text(context)
+        if not selected_prompt:
+            return base_instructions
+        return (
+            f"{base_instructions}\n\n"
+            "User-selected system prompt from AutoCruiseCE Settings:\n"
+            "<selected_system_prompt>\n"
+            f"{selected_prompt}\n"
+            "</selected_system_prompt>"
         )
 
     def _build_editor_repair_prompt(
@@ -557,7 +564,6 @@ class LiveActionPlanner:
                     }
                     for item in observation.detected_elements[:8]
                 ],
-                "repeat_guard": planning_meta.get("repeat_guard", {}),
                 "recent_actions": recent_payload,
                 "previous_plan": {
                     "summary": plan.summary,
@@ -932,6 +938,14 @@ class LiveActionPlanner:
             retrieved = context.get("retrieved_context")
             return (retrieved if isinstance(retrieved, RetrievedContext) else None), context
         return context, {}
+
+    def _selected_system_prompt_text(self, context: RetrievedContext | None) -> str:
+        if context is None:
+            return ""
+        for selection in context.selections:
+            if selection.kind == "systemprompt":
+                return selection.excerpt.strip()
+        return ""
 
     def _notice(self, message: str) -> None:
         if message == self._last_notice:

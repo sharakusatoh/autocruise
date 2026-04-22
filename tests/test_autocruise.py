@@ -37,6 +37,7 @@ from autocruise.domain.models import (
     ExecutionResult,
     ExecutingData,
     LoadingContextData,
+    KnowledgeSelection,
     Observation,
     ObservationKind,
     ObservingData,
@@ -670,6 +671,22 @@ class AutoCruiseTests(unittest.TestCase):
         selection = next(item for item in context.selections if item.kind == "systemprompt")
         self.assertEqual(Path(selection.path), bundled)
         self.assertIn("bundled source of truth", selection.excerpt)
+
+    def test_retrieval_keeps_selected_systemprompt_beyond_short_excerpt(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        prompt_path = data_root / "users" / "default" / "systemprompt" / "LongPrompt.md"
+        prompt_path.write_text("START\n" + ("x" * 1600) + "\nTAIL_MARKER", encoding="utf-8")
+        preferences = load_structured(paths.preferences_path())
+        preferences["selected_system_prompt"] = "LongPrompt.md"
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
+
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+
+        selection = next(item for item in context.selections if item.kind == "systemprompt")
+        self.assertEqual(Path(selection.path), prompt_path)
+        self.assertIn("TAIL_MARKER", selection.excerpt)
 
     def test_retrieval_uses_default_systemprompt_when_preference_key_is_missing(self) -> None:
         data_root = self.temp_dir / "runtime-data"
@@ -1354,7 +1371,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIn("search_terms", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
         self.assertIn("backend_hint", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
 
-    def test_live_planner_prompt_includes_repeat_guard_and_save_flags(self) -> None:
+    def test_live_planner_prompt_includes_save_flags_without_repeat_guard(self) -> None:
         settings = type(
             "Settings",
             (),
@@ -1459,23 +1476,84 @@ class AutoCruiseTests(unittest.TestCase):
             "Open Notepad, write a self introduction, and save it.",
             observation,
             recent_actions,
-            {
-                "session_id": "session-repeat",
-                "repeat_guard": {
-                    "last_action_signature": "type_text|editor_surface|Hello.",
-                    "previous_action_signature": "type_text|editor_surface|Hello.",
-                    "repeat_streak": 2,
-                    "observation_stable": True,
-                    "avoid_signature": "type_text|editor_surface|Hello.",
-                },
-            },
+            {"session_id": "session-autonomous"},
         )
 
         payload = json.loads(client.prompt)
         self.assertTrue(payload["save_requested"])
         self.assertFalse(payload["save_dialog_visible"])
-        self.assertEqual(payload["repeat_guard"]["repeat_streak"], 2)
-        self.assertEqual(payload["repeat_guard"]["avoid_signature"], "type_text|editor_surface|Hello.")
+        self.assertNotIn("repeat_guard", payload)
+        self.assertNotIn("remaining_step_budget", payload)
+
+    def test_live_planner_instructions_include_selected_system_prompt(self) -> None:
+        settings = type(
+            "Settings",
+            (),
+            {
+                "provider": "codex",
+                "base_url": "codex app-server",
+                "model": "gpt-5.4",
+                "timeout_seconds": 30,
+                "retry_count": 0,
+                "max_tokens": 500,
+                "allow_images": True,
+                "is_default": True,
+            },
+        )()
+        client = RecordingProviderClient(
+            json.dumps(
+                {
+                    "summary": "Done.",
+                    "reasoning": "The task is complete.",
+                    "plan_outline": [],
+                    "is_complete": True,
+                    "completion_reason": "complete",
+                }
+            )
+        )
+
+        class RecordingRegistry:
+            def get(self, provider: str):
+                return client
+
+        planner = LiveActionPlanner(
+            provider_repo=FakeProviderRepo(settings),
+            secret_store=FakeSecretStore(""),
+            provider_registry=RecordingRegistry(),
+        )
+        observation = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=1, title="Desktop"),
+            visible_windows=[WindowInfo(window_id=1, title="Desktop")],
+            detected_elements=[],
+            ui_tree_summary="Desktop",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=[],
+            recent_actions=[],
+            raw_ref={"observation_kind": ObservationKind.STRUCTURED.value, "vision_fallback_required": False},
+        )
+        context = RetrievedContext(
+            goal="Run a task",
+            stage="initial",
+            app_candidates=[],
+            task_candidates=[],
+            selections=[
+                KnowledgeSelection(
+                    kind="systemprompt",
+                    path="LongPrompt.md",
+                    score=4.9,
+                    reason="Selected system prompt",
+                    excerpt="SELECTED_SYSTEM_PROMPT_START\n" + ("x" * 500) + "\nSELECTED_SYSTEM_PROMPT_TAIL",
+                )
+            ],
+        )
+
+        planner.plan("Run a task", observation, [], context)
+
+        self.assertIn("User-selected system prompt", client.instructions)
+        self.assertIn("SELECTED_SYSTEM_PROMPT_START", client.instructions)
+        self.assertIn("SELECTED_SYSTEM_PROMPT_TAIL", client.instructions)
 
     def test_live_planner_repairs_wait_for_active_editor_authoring_task(self) -> None:
         settings = type(
@@ -1954,6 +2032,50 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(models[0].supported_service_tiers, ["auto", "fast"])
         self.assertEqual(models[0].display_name, "gpt-5.4")
 
+    def test_codex_thread_uses_full_access_without_approval(self) -> None:
+        captured: dict[str, object] = {}
+        connection = codex_app_server_module.CodexAppServerConnection(self.temp_dir)
+
+        def fake_request(method: str, params: dict, timeout_seconds: int = 45) -> dict:
+            captured["method"] = method
+            captured["params"] = params
+            return {"thread": {"id": "thread-1"}}
+
+        connection.request = fake_request  # type: ignore[method-assign]
+        thread_id = connection.start_thread("gpt-5.4", self.temp_dir)
+        self.assertEqual(thread_id, "thread-1")
+        params = captured["params"]
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["sandbox"], "danger-full-access")
+
+    def test_codex_turn_uses_full_access_without_approval(self) -> None:
+        sent_messages: list[dict] = []
+        connection = codex_app_server_module.CodexAppServerConnection(self.temp_dir)
+        connection._ensure_started_locked = lambda: None  # type: ignore[method-assign]
+        connection._send_locked = lambda message: sent_messages.append(message)  # type: ignore[method-assign]
+        connection._wait_for_response_locked = lambda request_id, timeout_seconds: {"turn": {"id": "turn-1"}}  # type: ignore[method-assign]
+        connection._wait_for_turn_completion_locked = lambda turn_id, timeout_seconds: "ok"  # type: ignore[method-assign]
+
+        result = connection.run_turn(
+            "thread-1",
+            input_items=[{"type": "text", "text": "hello"}],
+            model="gpt-5.4",
+            cwd=self.temp_dir,
+        )
+
+        self.assertEqual(result, "ok")
+        params = sent_messages[0]["params"]
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["sandbox"], "danger-full-access")
+        self.assertEqual(params["sandboxPolicy"]["type"], "dangerFullAccess")
+
+    def test_codex_approval_requests_are_approved(self) -> None:
+        sent_messages: list[dict] = []
+        connection = codex_app_server_module.CodexAppServerConnection(self.temp_dir)
+        connection._send_locked = lambda message: sent_messages.append(message)  # type: ignore[method-assign]
+        connection._respond_to_server_request_locked({"id": 10, "method": "item/1/requestApproval"})
+        self.assertEqual(sent_messages, [{"id": 10, "result": "approve"}])
+
     def test_uia_client_resolves_packaged_script_path(self) -> None:
         package_root = self.temp_dir / "package"
         script = package_root / "autocruise" / "infrastructure" / "windows" / "uia_client.ps1"
@@ -2000,10 +2122,10 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertFalse(normalized["max_steps_limit_enabled"])
         self.assertIsNone(normalized["max_steps_per_session"])
 
-    def test_normalize_preferences_preserves_explicit_step_limit(self) -> None:
+    def test_normalize_preferences_ignores_explicit_step_limit(self) -> None:
         normalized = normalize_preferences({"max_steps_per_session": 120})
-        self.assertTrue(normalized["max_steps_limit_enabled"])
-        self.assertEqual(normalized["max_steps_per_session"], 120)
+        self.assertFalse(normalized["max_steps_limit_enabled"])
+        self.assertIsNone(normalized["max_steps_per_session"])
 
     def test_workspace_paths_seed_user_files_into_data_root(self) -> None:
         data_root = self.temp_dir / "runtime-data"
@@ -2179,22 +2301,40 @@ class AutoCruiseTests(unittest.TestCase):
         page.retranslate()
         self.assertEqual(page.goal_input.placeholderText(), "")
 
-    def test_settings_page_treats_blank_max_steps_as_unlimited(self) -> None:
+    def test_settings_page_general_payload_keeps_steps_unlimited(self) -> None:
         set_locale("en")
         page = SettingsPage()
         page.set_general_values("en", "autonomous", None, "F8", "F12")
-        self.assertEqual(page.max_steps_edit.text(), "")
-        self.assertEqual(page.max_steps_edit.placeholderText(), "Unlimited")
         payload = page.general_payload()
         self.assertFalse(payload["max_steps_limit_enabled"])
         self.assertIsNone(payload["max_steps_per_session"])
 
-    def test_settings_page_saves_explicit_max_steps_limit(self) -> None:
+    def test_settings_page_system_prompt_refresh_does_not_emit_selection_change(self) -> None:
         page = SettingsPage()
-        page.max_steps_edit.setText("150")
+        emitted: list[str] = []
+        page.system_prompt_changed.connect(emitted.append)
+
+        page.set_general_values(
+            "en",
+            "autonomous",
+            None,
+            "F8",
+            "F12",
+            system_prompt_options=["PromptA.md", "PromptB.md"],
+            selected_system_prompt="PromptB.md",
+        )
+
+        self.assertEqual(page.system_prompt_combo.currentData(), "PromptB.md")
+        self.assertEqual(emitted, [])
+        page.system_prompt_combo.setCurrentIndex(1)
+        self.assertEqual(emitted, ["PromptA.md"])
+
+    def test_settings_page_does_not_expose_max_steps_control(self) -> None:
+        page = SettingsPage()
+        self.assertFalse(hasattr(page, "max_steps_edit"))
         payload = page.general_payload()
-        self.assertTrue(payload["max_steps_limit_enabled"])
-        self.assertEqual(payload["max_steps_per_session"], 150)
+        self.assertFalse(payload["max_steps_limit_enabled"])
+        self.assertIsNone(payload["max_steps_per_session"])
 
     def test_settings_page_ai_payload_tracks_service_tier_by_model(self) -> None:
         page = SettingsPage()
@@ -3159,11 +3299,11 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(plan.action.target.window_title, "Untitled - Notepad")
         self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
 
-    def test_windows_toolset_does_not_synthesize_text_for_generic_notepad_writing_goal(self) -> None:
+    def test_windows_toolset_synthesizes_text_for_generic_notepad_writing_goal(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
-                goal="Open Notepad and write a short sentence.",
+                goal="Open Notepad and write a sentence.",
                 stage="initial",
                 app_candidates=["notepad"],
                 task_candidates=["notepad_simple_writing"],
@@ -3182,12 +3322,14 @@ class AutoCruiseTests(unittest.TestCase):
             recent_actions=[],
         )
 
-        plan = toolset.plan_next_action("Open Notepad and write a short sentence.", observation, [], context)
+        plan = toolset.plan_next_action("Open Notepad and write a sentence.", observation, [], context)
 
         self.assertIsNotNone(plan.action)
-        self.assertEqual(plan.action.type, ActionType.WAIT)
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertIn("AutoCruise CE", plan.action.text)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
 
-    def test_windows_toolset_does_not_synthesize_self_introduction_for_notepad_goal(self) -> None:
+    def test_windows_toolset_synthesizes_self_introduction_for_notepad_goal(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
             "retrieved_context": RetrievedContext(
@@ -3213,7 +3355,40 @@ class AutoCruiseTests(unittest.TestCase):
         plan = toolset.plan_next_action("Open Notepad and write a self introduction.", observation, [], context)
 
         self.assertIsNotNone(plan.action)
-        self.assertEqual(plan.action.type, ActionType.WAIT)
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertIn("AutoCruise CE", plan.action.text)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
+
+    def test_windows_toolset_synthesizes_japanese_self_introduction_for_notepad_goal(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="メモ帳を開いて簡単な自己紹介文を書く",
+                stage="initial",
+                app_candidates=["notepad"],
+                task_candidates=["notepad_simple_writing"],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="notepad.png",
+            active_window=WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640)),
+            visible_windows=[WindowInfo(window_id=10, title="Untitled - Notepad", class_name="Notepad", bounds=Bounds(100, 100, 900, 640))],
+            detected_elements=[],
+            ui_tree_summary="Notepad editor window is open.",
+            cursor_position=(0, 0),
+            focused_element="ControlType.Document:Document",
+            textual_hints=["Notepad", "editor"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action("メモ帳を開いて簡単な自己紹介文を書く", observation, [], context)
+
+        self.assertIsNotNone(plan.action)
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertIn("AutoCruise CE", plan.action.text)
+        self.assertIn("よろしくお願いします", plan.action.text)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "editor:window")
 
     def test_windows_toolset_does_not_auto_complete_after_successful_editor_text_entry(self) -> None:
         toolset = self._make_windows_toolset()
@@ -3371,7 +3546,9 @@ class AutoCruiseTests(unittest.TestCase):
 
         self.assertFalse(plan.is_complete)
         self.assertIsNotNone(plan.action)
-        self.assertEqual(plan.action.type, ActionType.WAIT)
+        self.assertEqual(plan.action.type, ActionType.HOTKEY)
+        self.assertEqual(plan.action.hotkey, "CTRL+S")
+        self.assertEqual(plan.action.target.fallback_visual_hint, "editor:save-request")
 
     def test_windows_toolset_handles_save_dialog_after_ctrl_s(self) -> None:
         toolset = self._make_windows_toolset()
@@ -3451,7 +3628,9 @@ class AutoCruiseTests(unittest.TestCase):
         plan = toolset.plan_next_action("Open Notepad, write a self introduction, and save it.", observation, recent_actions, context)
 
         self.assertIsNotNone(plan.action)
-        self.assertEqual(plan.action.type, ActionType.WAIT)
+        self.assertEqual(plan.action.type, ActionType.TYPE_TEXT)
+        self.assertTrue(plan.action.text.endswith(".txt"))
+        self.assertEqual(plan.action.target.fallback_visual_hint, "editor:save-dialog")
 
     def test_windows_validation_requires_real_paint_window_for_launch_marker(self) -> None:
         toolset = self._make_windows_toolset()

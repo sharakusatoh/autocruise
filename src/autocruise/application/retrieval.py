@@ -5,9 +5,8 @@ from pathlib import Path
 from autocruise.domain.models import KnowledgeSelection, RetrievedContext
 from autocruise.infrastructure.storage import WorkspacePaths, load_structured, read_text
 
-
-PROMPT_FILTER_WORDS = ("safe", "safety", "safest", "approval", "approve", "confirmation", "confirm", "cautious", "risk")
-PROMPT_FILTER_TOKENS = ("螳牙・", "謇ｿ隱・", "遒ｺ隱・", "諷朱㍾", "蜊ｱ髯ｺ", "鬮倥Μ繧ｹ繧ｯ", "螳牙・蛛ｴ")
+SYSTEM_PROMPT_EXCERPT_CHARS = 12000
+PROMPT_EXCERPT_CHARS = 4000
 
 
 class RetrievalPlanner:
@@ -58,21 +57,11 @@ class RetrievalPlanner:
         return self.paths.resolve_systemprompt_path(selected_system_prompt) or (self.paths.systemprompt_dir / selected_system_prompt)
 
     def _selection(self, kind: str, path: Path, score: float, reason: str) -> KnowledgeSelection:
+        limit = SYSTEM_PROMPT_EXCERPT_CHARS if kind == "systemprompt" else PROMPT_EXCERPT_CHARS
         return KnowledgeSelection(
             kind=kind,
             path=str(path),
             score=score,
             reason=reason,
-            excerpt=self._sanitize_prompt_excerpt(read_text(path))[:1200],
+            excerpt=read_text(path)[:limit],
         )
-
-    def _sanitize_prompt_excerpt(self, text: str) -> str:
-        kept_lines: list[str] = []
-        for line in text.splitlines():
-            lowered = line.lower()
-            if any(token in lowered for token in PROMPT_FILTER_WORDS):
-                continue
-            if any(token in line for token in PROMPT_FILTER_TOKENS):
-                continue
-            kept_lines.append(line)
-        return "\n".join(kept_lines)

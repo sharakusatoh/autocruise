@@ -59,7 +59,6 @@ from autocruise.infrastructure.storage import (
     WorkspacePaths,
     append_jsonl,
     load_structured,
-    normalize_max_steps_preference,
     read_text,
     write_text_file,
 )
@@ -91,7 +90,7 @@ from autocruise.presentation.labels import (
     translation_key_for_text,
     tr,
 )
-from autocruise.presentation.ui.components import AppButton, AppTextEditor, Card, ListCard, ListPanel, SidebarItem, StatusBadge
+from autocruise.presentation.ui.components import AppButton, AppTextEditor, Card, SidebarItem, StatusBadge
 from autocruise.presentation.ui.icons import app_icon, nav_icon
 from autocruise.presentation.ui.pages.history_page import HistoryPage
 from autocruise.presentation.ui.pages.home_page import HomePage
@@ -149,9 +148,8 @@ def normalize_preferences(raw_preferences: dict | None) -> dict:
     merged["default_adapter_mode"] = mode
     autonomy_mode = str(merged.get("autonomy_mode", "autonomous") or "autonomous").strip().lower()
     merged["autonomy_mode"] = autonomy_mode if autonomy_mode in {"balanced", "autonomous"} else "autonomous"
-    max_steps_limit_enabled, max_steps = normalize_max_steps_preference(raw_preferences or merged)
-    merged["max_steps_limit_enabled"] = max_steps_limit_enabled
-    merged["max_steps_per_session"] = max_steps
+    merged["max_steps_limit_enabled"] = False
+    merged["max_steps_per_session"] = None
     merged["pause_hotkey"] = normalize_hotkey(str(merged.get("pause_hotkey", "F8") or ""))
     merged["stop_hotkey"] = normalize_hotkey(str(merged.get("stop_hotkey", "F12") or ""))
     return merged
@@ -347,7 +345,6 @@ class MainWindow(QMainWindow):
         self.pending_task_id = pending_task_id
         self.start_hidden = start_hidden
         self.pending_task_queue: deque[str] = deque()
-        self._suspend_thread_selection = False
         self._codex_result_message = ""
         self._pending_login_id = ""
         self._codex_models: list[CodexModelProfile] = []
@@ -495,13 +492,7 @@ class MainWindow(QMainWindow):
             self.sidebar_buttons[key] = button
             self.sidebar_icons[key] = (inactive, active)
 
-        self.thread_section = QLabel(tr("tab.history"))
-        self.thread_section.setProperty("role", "muted")
-        sidebar_layout.addWidget(self.thread_section)
-
-        self.thread_list = ListPanel()
-        self.thread_list.selected_payload.connect(self._open_thread_from_sidebar)
-        sidebar_layout.addWidget(self.thread_list, 1)
+        sidebar_layout.addStretch(1)
 
         splitter.addWidget(self.sidebar)
 
@@ -568,6 +559,7 @@ class MainWindow(QMainWindow):
 
         self.history_page.diagnostics_requested.connect(self._open_history_diagnostics)
         self.history_page.delete_requested.connect(self._delete_selected_thread)
+        self.history_page.selected_requested.connect(self._show_history_payload)
         self.knowledge_page.detail_requested.connect(self._open_knowledge_detail)
         self.knowledge_page.create_requested.connect(self._create_knowledge_item)
         self.knowledge_page.list_panel.selected_payload.connect(self._show_knowledge_payload)
@@ -652,12 +644,6 @@ class MainWindow(QMainWindow):
             button.setChecked(checked)
             inactive, active = self.sidebar_icons[name]
             button.setIcon(active if checked else inactive)
-
-    def _open_thread_from_sidebar(self, payload: dict | None) -> None:
-        if self._suspend_thread_selection or not payload:
-            return
-        self._select_page("threads")
-        self._show_history_payload(payload)
 
     def _is_session_active(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
@@ -1041,7 +1027,6 @@ class MainWindow(QMainWindow):
         self.sidebar_buttons["schedules"].setText(tr("tab.schedules"))
         self.sidebar_buttons["threads"].setText(tr("tab.history"))
         self.sidebar_buttons["settings"].setText(tr("tab.settings"))
-        self.thread_section.setText(tr("tab.history"))
         self.home_page.retranslate()
         self.history_page.retranslate()
         self.knowledge_page.retranslate()
@@ -1281,13 +1266,6 @@ class MainWindow(QMainWindow):
     def _refresh_history(self, preferred_session_id: str | None = None) -> None:
         selected_id = preferred_session_id if preferred_session_id is not None else self.selected_history_id
         self.history_records = load_session_history(self.paths, limit=int(self.preferences.get("history_display_limit", 120)))
-        self._suspend_thread_selection = True
-
-        def factory(payload: dict) -> QWidget:
-            meta = [payload.get("display_time", "")]
-            return ListCard(payload.get("instruction", ""), meta, single_line_title=True, compact=True)
-
-        self.thread_list.replace_items(self.history_records, factory)
         active_payload = None
         if self.history_records:
             target_index = 0
@@ -1296,11 +1274,9 @@ class MainWindow(QMainWindow):
                     if record.get("session_id") == selected_id:
                         target_index = index
                         break
-            self.thread_list.setCurrentRow(target_index)
-            item = self.thread_list.item(target_index)
-            active_payload = item.data(Qt.UserRole) if item is not None else self.history_records[target_index]
-        self._suspend_thread_selection = False
-        self.history_page.set_records(self.history_records)
+            active_payload = self.history_records[target_index]
+        active_session_id = active_payload.get("session_id", "") if active_payload else ""
+        self.history_page.set_records(self.history_records, active_session_id)
         self._show_history_payload(active_payload)
 
     def _refresh_schedules(self) -> None:
@@ -1848,6 +1824,7 @@ class MainWindow(QMainWindow):
         if self.preferences.get("selected_system_prompt", "") == normalized:
             return
         self.preferences["selected_system_prompt"] = normalized
+        self._save_preferences()
 
     def _new_system_prompt(self) -> None:
         path = self.paths.systemprompt_dir / f"systemprompt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
@@ -2040,13 +2017,6 @@ class MainWindow(QMainWindow):
                 },
             ]
 
-            def factory(payload: dict) -> QWidget:
-                meta = [payload.get("display_time", "")]
-                return ListCard(payload.get("instruction", ""), meta, single_line_title=True, compact=True)
-
-            self._suspend_thread_selection = True
-            self.thread_list.replace_items(self.history_records, factory)
-            self._suspend_thread_selection = False
         if self.history_records:
             self._show_history_payload(self.history_records[0])
         self._select_page("home")

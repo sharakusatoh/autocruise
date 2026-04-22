@@ -5,20 +5,31 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidget, QScrollArea, QVBoxLayout, QWidget
 
 from autocruise.presentation.labels import tr
-from autocruise.presentation.ui.components import AppButton, Card, EmptyState, SectionHeader, ThinScrollBar
+from autocruise.presentation.ui.components import AppButton, Card, EmptyState, ListCard, ListPanel, SectionHeader, ThinScrollBar
 
 
 class HistoryPage(QWidget):
     diagnostics_requested = Signal()
     delete_requested = Signal()
+    selected_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._preview: QPixmap | None = None
 
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(24)
+
+        self.list_card = Card()
+        list_layout = QVBoxLayout(self.list_card)
+        list_layout.setContentsMargins(24, 24, 24, 24)
+        list_layout.setSpacing(12)
+        self.list_header = SectionHeader(tr("tab.history"), tr("message.no_history"))
+        list_layout.addWidget(self.list_header)
+        self.list_panel = ListPanel()
+        list_layout.addWidget(self.list_panel, 1)
+        layout.addWidget(self.list_card, 4)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -27,7 +38,7 @@ class HistoryPage(QWidget):
         scroll.setVerticalScrollBar(ThinScrollBar(Qt.Vertical, scroll))
         scroll.setViewportMargins(0, 0, 12, 0)
         scroll.verticalScrollBar().setSingleStep(20)
-        layout.addWidget(scroll)
+        layout.addWidget(scroll, 6)
 
         content = QWidget()
         scroll.setWidget(content)
@@ -79,12 +90,25 @@ class HistoryPage(QWidget):
 
         self.diagnostics_button.clicked.connect(self.diagnostics_requested.emit)
         self.delete_button.clicked.connect(self.delete_requested.emit)
+        self.list_panel.selected_payload.connect(self.selected_requested.emit)
         self.clear_detail()
 
-    def set_records(self, records: list[dict]) -> None:
+    def set_records(self, records: list[dict], selected_session_id: str = "") -> None:
+        def factory(payload: dict) -> QWidget:
+            meta = [payload.get("display_time", ""), payload.get("display_result", "")]
+            return ListCard(payload.get("instruction", ""), meta, single_line_title=True, compact=True)
+
+        self.list_panel.replace_items(records, factory)
         if not records:
+            self.list_header.set_text(tr("tab.history"), tr("message.no_history"))
             self.clear_detail()
             return
+        self.list_header.set_text(tr("tab.history"))
+        if selected_session_id:
+            for index, record in enumerate(records):
+                if record.get("session_id") == selected_session_id:
+                    self.list_panel.setCurrentRow(index)
+                    break
         if not self.diagnostics_button.isEnabled():
             self.detail_header.set_text(tr("label.history_summary"), tr("message.no_selection"))
 
@@ -136,6 +160,7 @@ class HistoryPage(QWidget):
             self.preview.setPixmap(self._preview.scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def retranslate(self) -> None:
+        self.list_header.set_text(tr("tab.history"))
         self.capture_header.set_text(tr("label.saved_captures"))
         self.preview_empty.set_copy(tr("empty.session_title"), tr("empty.session_subtitle"))
         self.diagnostics_button.setText(tr("button.details"))

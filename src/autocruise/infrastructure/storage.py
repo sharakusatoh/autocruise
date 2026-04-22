@@ -29,9 +29,6 @@ DEFAULT_PROVIDER_SETTINGS: list[ProviderSettings] = [
 ]
 
 CRYPTPROTECT_UI_FORBIDDEN = 0x01
-LEGACY_MAX_STEPS_DEFAULT = 60
-MAX_STEPS_LIMIT_MIN = 5
-MAX_STEPS_LIMIT_MAX = 5000
 TEXT_READ_ENCODINGS = ("utf-8", "utf-8-sig", "cp932", "utf-16")
 
 
@@ -101,44 +98,6 @@ def load_structured(path: Path) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def normalize_max_steps_preference(raw_preferences: dict[str, Any] | None) -> tuple[bool, int | None]:
-    preferences = raw_preferences or {}
-    raw_enabled = preferences.get("max_steps_limit_enabled")
-    raw_value = preferences.get("max_steps_per_session")
-
-    if raw_enabled is None:
-        parsed = _coerce_optional_int(raw_value)
-        if parsed is None or parsed <= 0 or parsed == LEGACY_MAX_STEPS_DEFAULT:
-            return False, None
-        return True, max(MAX_STEPS_LIMIT_MIN, min(MAX_STEPS_LIMIT_MAX, parsed))
-
-    enabled = _coerce_bool(raw_enabled)
-    if not enabled:
-        return False, None
-
-    parsed = _coerce_optional_int(raw_value)
-    if parsed is None or parsed <= 0:
-        return False, None
-    return True, max(MAX_STEPS_LIMIT_MIN, min(MAX_STEPS_LIMIT_MAX, parsed))
-
-
-def _coerce_optional_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -199,7 +158,7 @@ class WorkspacePaths:
         if not any(self.iter_systemprompt_names()):
             write_text_file(
                 self.systemprompt_dir / "default.md",
-                "# Default System Prompt\n\nFocus on practical progress and concise planning.\n",
+                "# Default System Prompt\n\nAct autonomously and keep progressing until the task is complete.\n",
                 encoding="utf-8",
             )
 
@@ -296,6 +255,9 @@ class WorkspacePaths:
             "## Caution Preference",
             "## Confirmation Granularity",
             "Favor reliability and auditability over raw speed.",
+            "Keep explanations concise and practical.",
+            "Keep a short overall route in mind",
+            "Favor momentum, visible progress, and task completion over caution wording.",
         )
         return any(marker in current for marker in legacy_markers)
 

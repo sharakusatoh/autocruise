@@ -263,6 +263,16 @@ class WindowsAgentToolset:
         if explicit_text_step is not None:
             return self._with_wait_defaults(explicit_text_step)
 
+        editor_text_step = self._plan_editor_text_entry(
+            goal,
+            observation,
+            recent_actions,
+            retrieved_context,
+            self._extract_requested_text(goal),
+        )
+        if editor_text_step is not None:
+            return self._with_wait_defaults(editor_text_step)
+
         quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal) if item.strip()]
         editable_target = self._pick_edit_target(observation.detected_elements)
         if quoted and editable_target and not self._recently_repeated(
@@ -1003,9 +1013,79 @@ class WindowsAgentToolset:
                     return candidate
         return ""
     def _synthesize_editor_text_draft(self, goal: str, retrieved_context, requested_text: str) -> str:
-        _ = goal
         _ = retrieved_context
-        return requested_text
+        if requested_text:
+            return requested_text
+        if not self._looks_like_self_introduction_request(goal):
+            return self._synthesize_generic_editor_draft(goal, retrieved_context)
+        if self._goal_prefers_japanese(goal):
+            return (
+                "こんにちは。私はAutoCruise CEです。"
+                "Windows上の作業を支援するデスクトップ操作エージェントです。"
+                "画面の確認、アプリの起動、文章入力などを手伝えます。よろしくお願いします。"
+            )
+        return (
+            "Hello. I am AutoCruise CE, a Windows desktop operator. "
+            "I can help open apps, inspect the screen, and carry out simple writing tasks."
+        )
+
+    def _synthesize_generic_editor_draft(self, goal: str, retrieved_context) -> str:
+        if not self._looks_like_editor_goal(goal, retrieved_context):
+            return ""
+        normalized_goal = self._normalize_text(goal)
+        wants_paragraph = any(
+            self._normalize_text(term) in normalized_goal
+            for term in ("paragraph", "essay", "article", "文章", "段落", "作文")
+        )
+        wants_note = any(
+            self._normalize_text(term) in normalized_goal
+            for term in ("note", "memo", "メモ", "覚え書き")
+        )
+        if self._goal_prefers_japanese(goal):
+            if wants_paragraph:
+                return (
+                    "AutoCruise CEは依頼内容をもとに、自律的に文章を作成します。"
+                    "目的や画面の状況を読み取り、必要な内容を判断しながら、自然に読める形へまとめます。"
+                    "ユーザーが細かい文面を指定していない場合でも、作業を止めずに前へ進めることを重視します。"
+                )
+            if wants_note:
+                return (
+                    "作業メモ: AutoCruise CEは依頼内容を確認し、必要な内容を自律的に判断して入力しました。"
+                    "追加の指定がない場合でも、作業の目的に沿って次の行動を選びます。"
+                )
+            return (
+                "AutoCruise CEは依頼内容に合わせて、自律的に文章を作成しました。"
+                "細かな文面が指定されていなくても、目的を満たす内容を判断して入力します。"
+            )
+        if wants_paragraph:
+            return (
+                "AutoCruise CE writes autonomously from the user's request. "
+                "When the exact wording is not specified, it interprets the goal, chooses useful content, "
+                "and continues the task instead of waiting for unnecessary clarification."
+            )
+        if wants_note:
+            return (
+                "Note: AutoCruise CE reviewed the request, chose the necessary content autonomously, "
+                "and continued the task without requiring exact wording."
+            )
+        return (
+            "AutoCruise CE created this text autonomously from the request. "
+            "It chooses appropriate content and action when no exact wording is provided."
+        )
+
+    def _looks_like_self_introduction_request(self, goal: str) -> bool:
+        normalized_goal = self._normalize_text(goal)
+        terms = (
+            "selfintroduction",
+            "introduceyourself",
+            "aboutme",
+            "自己紹介",
+            "自己紹介文",
+        )
+        return any(self._normalize_text(term) in normalized_goal for term in terms)
+
+    def _goal_prefers_japanese(self, goal: str) -> bool:
+        return any("\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" for char in str(goal or ""))
 
     def _looks_like_editor_goal(self, goal: str, retrieved_context) -> bool:
         if self._requested_launch_app(goal, retrieved_context) == "notepad":

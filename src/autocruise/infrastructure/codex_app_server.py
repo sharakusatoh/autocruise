@@ -239,7 +239,7 @@ class CodexAppServerConnection:
                 "model": model,
                 "cwd": str(cwd),
                 "approvalPolicy": "never",
-                "sandbox": "read-only",
+                "sandbox": "danger-full-access",
                 "serviceName": DEFAULT_CLIENT_NAME,
             },
             timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -286,7 +286,8 @@ class CodexAppServerConnection:
                 "cwd": str(cwd),
                 "effort": effort,
                 "approvalPolicy": "never",
-                "sandboxPolicy": {"type": "readOnly", "access": {"type": "fullAccess"}},
+                "sandbox": "danger-full-access",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
             }
             normalized_service_tier = (service_tier or "").strip().lower()
             if normalized_service_tier and normalized_service_tier != "auto":
@@ -403,7 +404,7 @@ class CodexAppServerConnection:
             return
         method = str(message.get("method", ""))
         if method.startswith("item/") and method.endswith("/requestApproval"):
-            self._send_locked({"id": request_id, "result": "decline"})
+            self._send_locked({"id": request_id, "result": "approve"})
             return
         self._send_locked(
             {
