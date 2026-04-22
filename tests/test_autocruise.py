@@ -131,6 +131,7 @@ def bootstrap_workspace(root: Path) -> WorkspacePaths:
                 "autonomy_mode": "autonomous",
                 "pause_hotkey": "F8",
                 "stop_hotkey": "F12",
+                "system_prompt_selection_initialized": True,
             }
         ),
         encoding="utf-8",
@@ -688,7 +689,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(Path(selection.path), prompt_path)
         self.assertIn("TAIL_MARKER", selection.excerpt)
 
-    def test_retrieval_uses_default_systemprompt_when_preference_key_is_missing(self) -> None:
+    def test_retrieval_skips_systemprompt_when_preference_key_is_missing(self) -> None:
         data_root = self.temp_dir / "runtime-data"
         paths = WorkspacePaths(self.temp_dir, data_root=data_root)
         paths.ensure()
@@ -700,9 +701,65 @@ class AutoCruiseTests(unittest.TestCase):
 
         context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
 
+        self.assertFalse(any(item.kind == "systemprompt" for item in context.selections))
+
+    def test_retrieval_skips_systemprompt_when_saved_selection_is_empty(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        bundled.write_text("default execution prompt", encoding="utf-8")
+        preferences = load_structured(paths.preferences_path())
+        preferences["selected_system_prompt"] = ""
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
+
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+
+        self.assertFalse(any(item.kind == "systemprompt" for item in context.selections))
+
+    def test_retrieval_skips_systemprompt_when_saved_selection_is_missing(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        preferences = load_structured(paths.preferences_path())
+        preferences["selected_system_prompt"] = "MissingPrompt.md"
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
+
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+
+        self.assertFalse(any(item.kind == "systemprompt" for item in context.selections))
+
+    def test_retrieval_skips_legacy_auto_cruise_default_until_user_saves_selection(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        bundled.write_text("legacy default prompt", encoding="utf-8")
+        preferences = load_structured(paths.preferences_path())
+        preferences["selected_system_prompt"] = "AutoCruise.md"
+        preferences.pop("system_prompt_selection_initialized", None)
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
+
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+
+        self.assertFalse(any(item.kind == "systemprompt" for item in context.selections))
+
+    def test_retrieval_uses_auto_cruise_when_user_saved_selection_after_migration(self) -> None:
+        data_root = self.temp_dir / "runtime-data"
+        paths = WorkspacePaths(self.temp_dir, data_root=data_root)
+        paths.ensure()
+        bundled = self.temp_dir / "users" / "default" / "systemprompt" / "AutoCruise.md"
+        bundled.write_text("explicitly saved prompt", encoding="utf-8")
+        preferences = load_structured(paths.preferences_path())
+        preferences["selected_system_prompt"] = "AutoCruise.md"
+        preferences["system_prompt_selection_initialized"] = True
+        paths.preferences_path().write_text(json.dumps(preferences), encoding="utf-8")
+
+        context = RetrievalPlanner(paths).retrieve("Run a desktop task", stage="initial")
+
         selection = next(item for item in context.selections if item.kind == "systemprompt")
         self.assertEqual(Path(selection.path), bundled)
-        self.assertIn("default execution prompt", selection.excerpt)
+        self.assertIn("explicitly saved prompt", selection.excerpt)
 
     def test_knowledge_items_only_include_custom_prompts(self) -> None:
         items = build_knowledge_items(WorkspacePaths(ROOT))
@@ -2111,6 +2168,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(normalized["stop_hotkey"], "F12")
         self.assertFalse(normalized["max_steps_limit_enabled"])
         self.assertIsNone(normalized["max_steps_per_session"])
+        self.assertEqual(normalized["selected_system_prompt"], "")
         self.assertEqual(normalized["keep_important_screenshots_days"], 21)
         self.assertNotIn("default_provider", normalized)
         self.assertNotIn("keep_high_risk_screenshots_days", normalized)
@@ -2121,6 +2179,20 @@ class AutoCruiseTests(unittest.TestCase):
         normalized = normalize_preferences({"max_steps_per_session": 60})
         self.assertFalse(normalized["max_steps_limit_enabled"])
         self.assertIsNone(normalized["max_steps_per_session"])
+
+    def test_normalize_preferences_clears_legacy_auto_cruise_default(self) -> None:
+        normalized = normalize_preferences({"selected_system_prompt": "AutoCruise.md"})
+        self.assertEqual(normalized["selected_system_prompt"], "")
+        self.assertTrue(normalized["system_prompt_selection_initialized"])
+
+    def test_normalize_preferences_keeps_user_saved_auto_cruise_selection(self) -> None:
+        normalized = normalize_preferences(
+            {
+                "selected_system_prompt": "AutoCruise.md",
+                "system_prompt_selection_initialized": True,
+            }
+        )
+        self.assertEqual(normalized["selected_system_prompt"], "AutoCruise.md")
 
     def test_normalize_preferences_ignores_explicit_step_limit(self) -> None:
         normalized = normalize_preferences({"max_steps_per_session": 120})
@@ -2325,9 +2397,11 @@ class AutoCruiseTests(unittest.TestCase):
         )
 
         self.assertEqual(page.system_prompt_combo.currentData(), "PromptB.md")
+        self.assertEqual(page.general_payload()["selected_system_prompt"], "PromptB.md")
         self.assertEqual(emitted, [])
         page.system_prompt_combo.setCurrentIndex(1)
         self.assertEqual(emitted, ["PromptA.md"])
+        self.assertEqual(page.general_payload()["selected_system_prompt"], "PromptA.md")
 
     def test_settings_page_does_not_expose_max_steps_control(self) -> None:
         page = SettingsPage()

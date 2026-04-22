@@ -2,7 +2,7 @@
 
 AutoCruise CE is a Windows desktop automation app powered by Codex App Server and ChatGPT sign-in. It observes the current desktop, asks Codex for the next action, executes through Windows automation and input backends, and continues until the task is complete or the user stops it.
 
-Current source and packaged release version: `1.1.0`
+Current source and packaged release version: `1.2.0`
 
 The project is experimental. Verify important operations yourself before relying on the result in a real workflow.
 
@@ -20,7 +20,7 @@ AutoCruise CE is distributed as a portable Windows package. There is no installe
 
 Download the latest portable archive from GitHub Releases:
 
-- [AutoCruiseCE-portable-1.1.0.zip](https://github.com/sharakusatoh/autocruise/releases/download/v1.1.0/AutoCruiseCE-portable-1.1.0.zip)
+- [AutoCruiseCE-portable-1.2.0.zip](https://github.com/sharakusatoh/autocruise/releases/download/v1.2.0/AutoCruiseCE-portable-1.2.0.zip)
 
 To run it:
 
@@ -89,7 +89,7 @@ build_windows.bat
 This creates:
 
 - `release\AutoCruiseCE\AutoCruiseCE.exe`
-- `release\AutoCruiseCE-portable-1.1.0.zip`
+- `release\AutoCruiseCE-portable-1.2.0.zip`
 
 `release/` is intentionally excluded from Git tracking. Publish the zip through GitHub Releases.
 

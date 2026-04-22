@@ -118,7 +118,8 @@ DEFAULT_PREFERENCES = {
     "history_display_limit": 120,
     "pause_hotkey": "F8",
     "stop_hotkey": "F12",
-    "selected_system_prompt": "AutoCruise.md",
+    "selected_system_prompt": "",
+    "system_prompt_selection_initialized": True,
     "show_onboarding_on_start": False,
     "onboarding_completed": True,
 }
@@ -133,7 +134,15 @@ LEGACY_PREFERENCE_KEYS = {
 
 
 def normalize_preferences(raw_preferences: dict | None) -> dict:
+    migrated_legacy_system_prompt_default = (
+        raw_preferences is not None
+        and "system_prompt_selection_initialized" not in raw_preferences
+        and str(raw_preferences.get("selected_system_prompt", "") or "").strip() == "AutoCruise.md"
+    )
     merged = {**DEFAULT_PREFERENCES, **(raw_preferences or {})}
+    if migrated_legacy_system_prompt_default:
+        merged["selected_system_prompt"] = ""
+    merged["system_prompt_selection_initialized"] = True
     if raw_preferences and "keep_important_screenshots_days" not in raw_preferences:
         if "keep_high_risk_screenshots_days" in raw_preferences:
             merged["keep_important_screenshots_days"] = raw_preferences["keep_high_risk_screenshots_days"]
@@ -320,6 +329,7 @@ class MainWindow(QMainWindow):
         self.provider_registry = ProviderRegistry(self.paths.root, codex_app_server=self.codex_app_server)
         self.task_scheduler = WindowsTaskSchedulerService()
         self.preferences = self._load_preferences()
+        self.pending_system_prompt_selection: str | None = None
         self.logo_path = self.paths.root / "autocruise_logo.png"
         self.brand_icon = self._load_app_icon()
         set_locale(self.preferences.get("language", "en"))
@@ -1084,7 +1094,7 @@ class MainWindow(QMainWindow):
             pause_hotkey=self.preferences.get("pause_hotkey", "F8"),
             stop_hotkey=self.preferences.get("stop_hotkey", "F12"),
             system_prompt_options=self._system_prompt_options(),
-            selected_system_prompt=self.preferences.get("selected_system_prompt", ""),
+            selected_system_prompt=self._current_system_prompt_selection(),
         )
         self.settings_page.set_storage_values(
             ttl_days=int(self.preferences.get("screenshot_ttl_days", 3)),
@@ -1699,6 +1709,7 @@ class MainWindow(QMainWindow):
     def _save_general_settings(self) -> None:
         payload = self.settings_page.general_payload()
         self.preferences.update(payload)
+        self.pending_system_prompt_selection = None
         self._save_preferences()
         self._refresh_hotkeys(show_feedback=True)
         self._update_connection_state()
@@ -1813,8 +1824,13 @@ class MainWindow(QMainWindow):
     def _system_prompt_options(self) -> list[str]:
         return self.paths.iter_systemprompt_names()
 
+    def _current_system_prompt_selection(self) -> str:
+        if self.pending_system_prompt_selection is not None:
+            return self.pending_system_prompt_selection
+        return str(self.preferences.get("selected_system_prompt", "") or "").strip()
+
     def _selected_system_prompt_path(self) -> Path | None:
-        selected = str(self.preferences.get("selected_system_prompt", "") or "").strip()
+        selected = self._current_system_prompt_selection()
         if not selected:
             return None
         return self.paths.resolve_systemprompt_path(selected)
@@ -1822,14 +1838,15 @@ class MainWindow(QMainWindow):
     def _remember_system_prompt_selection(self, selected: str) -> None:
         normalized = str(selected or "").strip()
         if self.preferences.get("selected_system_prompt", "") == normalized:
+            self.pending_system_prompt_selection = None
             return
-        self.preferences["selected_system_prompt"] = normalized
-        self._save_preferences()
+        self.pending_system_prompt_selection = normalized
 
     def _new_system_prompt(self) -> None:
         path = self.paths.systemprompt_dir / f"systemprompt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
         write_text_file(path, "# System Prompt\n\nDescribe the execution style for this profile.\n", encoding="utf-8")
         self.preferences["selected_system_prompt"] = path.name
+        self.pending_system_prompt_selection = None
         self._save_preferences()
         self._refresh_settings()
         self._open_text_dialog(path.stem, read_text(path), editable=True, save_path=path)
@@ -1845,6 +1862,7 @@ class MainWindow(QMainWindow):
             if not save_path.exists():
                 write_text_file(save_path, read_text(path), encoding="utf-8")
             self.preferences["selected_system_prompt"] = save_path.name
+            self.pending_system_prompt_selection = None
             self._save_preferences()
             self._refresh_settings()
         self._open_text_dialog(save_path.stem, read_text(save_path), editable=True, save_path=save_path)
@@ -1922,6 +1940,7 @@ class MainWindow(QMainWindow):
                     self._refresh_knowledge()
                     if save_path.parent == self.paths.systemprompt_dir:
                         self.preferences["selected_system_prompt"] = save_path.name
+                        self.pending_system_prompt_selection = None
                         self._save_preferences()
                         self._refresh_settings()
                     updated = next(

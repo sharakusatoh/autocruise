@@ -10,7 +10,7 @@ set "BUILD_ROOT=%~dp0build"
 set "BUILD_DIR=%~dp0build\pyinstaller"
 
 for /f %%i in ('python -c "import sys; sys.path.insert(0, r'%~dp0src'); from autocruise.version import APP_VERSION; print(APP_VERSION, end='') "') do set "APP_VERSION=%%i"
-if "%APP_VERSION%"=="" set "APP_VERSION=1.1.0"
+if "%APP_VERSION%"=="" set "APP_VERSION=1.2.0"
 
 if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
 

@@ -48,13 +48,17 @@ class RetrievalPlanner:
 
     def _selected_system_prompt(self) -> Path | None:
         preferences = load_structured(self.paths.users_dir / "default" / "preferences.yaml")
-        raw_system_prompt = (preferences or {}).get("selected_system_prompt")
-        if raw_system_prompt is None and self.paths.resolve_systemprompt_path("AutoCruise.md"):
-            raw_system_prompt = "AutoCruise.md"
+        if (
+            preferences
+            and "system_prompt_selection_initialized" not in preferences
+            and str(preferences.get("selected_system_prompt", "") or "").strip() == "AutoCruise.md"
+        ):
+            return None
+        raw_system_prompt = (preferences or {}).get("selected_system_prompt", "")
         selected_system_prompt = str(raw_system_prompt or "").strip()
         if not selected_system_prompt:
             return None
-        return self.paths.resolve_systemprompt_path(selected_system_prompt) or (self.paths.systemprompt_dir / selected_system_prompt)
+        return self.paths.resolve_systemprompt_path(selected_system_prompt)
 
     def _selection(self, kind: str, path: Path, score: float, reason: str) -> KnowledgeSelection:
         limit = SYSTEM_PROMPT_EXCERPT_CHARS if kind == "systemprompt" else PROMPT_EXCERPT_CHARS
