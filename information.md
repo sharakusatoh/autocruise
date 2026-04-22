@@ -24,4 +24,4 @@ No other bundled prompt-source categories are loaded as model context.
 
 ## Distribution
 
-`build_windows.bat` creates the PyInstaller app folder and portable ZIP under `release/`. The release package includes source-independent runtime files, UIA PowerShell support, docs, constitution, system prompts, custom prompts, README, and icon assets.
+`build_windows.bat` creates the PyInstaller app folder and portable ZIP under `release/`. AutoCruise CE is distributed as a portable package only; no installer is built or published. The release package includes source-independent runtime files, UIA PowerShell support, docs, constitution, system prompts, custom prompts, README, and icon assets.

@@ -8,14 +8,11 @@ set "SPEC_FILE=%~dp0AutoCruise.spec"
 set "RELEASE_DIR=%~dp0release"
 set "BUILD_ROOT=%~dp0build"
 set "BUILD_DIR=%~dp0build\pyinstaller"
-set "INSTALLER_SCRIPT=%~dp0installer\AutoCruiseCE.iss"
-set "INSTALLER_DIR=%RELEASE_DIR%\installer"
 
 for /f %%i in ('python -c "import sys; sys.path.insert(0, r'%~dp0src'); from autocruise.version import APP_VERSION; print(APP_VERSION, end='') "') do set "APP_VERSION=%%i"
 if "%APP_VERSION%"=="" set "APP_VERSION=1.1.0"
 
 if not exist "%RELEASE_DIR%" mkdir "%RELEASE_DIR%"
-if not exist "%INSTALLER_DIR%" mkdir "%INSTALLER_DIR%"
 
 if exist "%RELEASE_DIR%\%APP_NAME%" (
   rmdir /s /q "%RELEASE_DIR%\%APP_NAME%"
@@ -29,8 +26,8 @@ if exist "%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip" (
 for %%F in ("%RELEASE_DIR%\AutoCruise-portable-*.zip") do (
   if exist "%%~fF" del /q "%%~fF"
 )
-if exist "%INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe" (
-  del /q "%INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe"
+if exist "%RELEASE_DIR%\installer" (
+  rmdir /s /q "%RELEASE_DIR%\installer"
 )
 
 if exist "%BUILD_DIR%" (
@@ -72,19 +69,6 @@ if errorlevel 1 (
   exit /b 1
 )
 
-where iscc >nul 2>&1
-if errorlevel 1 (
-  echo Inno Setup was not found. Skipping installer build.
-  echo To build Setup.exe, install Inno Setup and rerun this script.
-) else (
-  echo Building Windows installer...
-  iscc /Qp /DAppVersion=%APP_VERSION% /DSourceDir="%RELEASE_DIR%\%APP_NAME%" /DOutputDir="%INSTALLER_DIR%" "%INSTALLER_SCRIPT%"
-  if errorlevel 1 (
-    echo Installer build failed.
-    exit /b 1
-  )
-)
-
 for /d /r "%~dp0" %%d in (__pycache__) do (
   if exist "%%d" rmdir /s /q "%%d"
 )
@@ -102,9 +86,5 @@ echo Double-click this file to start:
 echo %RELEASE_DIR%\%APP_NAME%\AutoCruiseCE.exe
 echo Portable package:
 echo %RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip
-if exist "%INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe" (
-  echo Installer:
-  echo %INSTALLER_DIR%\%APP_NAME%-Setup-%APP_VERSION%.exe
-)
 
 exit /b 0

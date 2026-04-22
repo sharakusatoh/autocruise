@@ -11,7 +11,7 @@ AutoCruise CE is a Windows desktop application for autonomous GUI operation. The
 - PySide6 provides a real Windows desktop UI with better input-method behavior than a minimal widget toolkit.
 - The codebase can call Win32 APIs through `ctypes` for screenshots, windows, keyboard, mouse, clipboard, and hotkeys.
 - PowerShell is used only for the Microsoft UI Automation client layer where .NET UIA APIs are the most direct Windows path.
-- PyInstaller can produce a portable Windows folder and optional installer package from the same codebase.
+- PyInstaller produces the portable Windows folder used for releases.
 
 ### Why Structured Automation First
 
@@ -167,7 +167,6 @@ The settings screen includes:
 
 - Language
 - Autonomy mode
-- Optional maximum step count, blank by default for unlimited runs
 - Pause and stop hotkeys
 - Codex App Server status
 - ChatGPT sign-in / sign-out
@@ -179,6 +178,6 @@ The settings screen includes:
 
 ## Distribution
 
-`build_windows.bat` produces the PyInstaller folder, portable ZIP, and installer when Inno Setup is installed. The package includes the UIA PowerShell scripts, docs, prompt assets, icon assets, and default user configuration.
+`build_windows.bat` produces the PyInstaller folder and portable ZIP. AutoCruise CE no longer builds or publishes an installer. The package includes the UIA PowerShell scripts, docs, prompt assets, icon assets, and default user configuration.
 
 Before release, run the checks in `docs/release_qa_checklist.md`.

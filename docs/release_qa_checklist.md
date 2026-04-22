@@ -8,6 +8,7 @@ Use this checklist before shipping a Windows build. Record the build path, date,
 - Run `build_windows.bat`.
 - Confirm `release\AutoCruiseCE\AutoCruiseCE.exe` starts.
 - Confirm `release\AutoCruiseCE-portable-<version>.zip` exists.
+- Confirm no installer folder or setup executable is produced.
 - Confirm `autocruise\infrastructure\windows\uia_client.ps1` is present in the release folder.
 - Confirm Playwright or browser binaries are not bundled by default.
 
