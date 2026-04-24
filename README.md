@@ -116,7 +116,7 @@ Additional background on bundled system prompts:
 
 ## UI Preview
 
-![AutoCruise CE home UI](docs/ui-renewal-home.png)
+![AutoCruise CE home UI](docs/ui-preview-home-1.3.0.png)
 
 ## Repository Contents
 

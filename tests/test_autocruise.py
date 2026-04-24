@@ -4236,7 +4236,7 @@ class AutoCruiseTests(unittest.TestCase):
         setup_bootstrapper_path = ROOT / "setup_bootstrapper.py"
         batch_path = ROOT / "build_windows.bat"
         icon_path = ROOT / "autocruise_logo.ico"
-        screenshot_path = ROOT / "docs" / "ui-renewal-home.png"
+        screenshot_path = ROOT / "docs" / "ui-preview-home-1.3.0.png"
         readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
         batch_text = batch_path.read_text(encoding="utf-8")
         spec_text = spec_path.read_text(encoding="utf-8")
@@ -4270,7 +4270,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertNotIn("ensure_bundled_runtime", batch_text)
         self.assertIn("img.save", batch_text)
         self.assertTrue(screenshot_path.exists())
-        self.assertIn("docs/ui-renewal-home.png", readme_text)
+        self.assertIn("docs/ui-preview-home-1.3.0.png", readme_text)
         self.assertIn("release\\AutoCruiseCE\\AutoCruiseCE.exe", readme_text)
         self.assertIn("AutoCruiseSetup.exe", readme_text)
         self.assertIn("portable", readme_text.lower())
