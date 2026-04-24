@@ -27,7 +27,8 @@ To run it:
 
 1. Extract the zip.
 2. Open the extracted `AutoCruiseCE` folder.
-3. Run `AutoCruiseCE.exe`.
+3. Run `AutoCruiseSetup.exe` first if Node.js, npm, or Codex CLI is not already configured.
+4. Run `AutoCruiseCE.exe`.
 
 The app does not need to be installed. To remove it, close the app and delete the extracted folder.
 
@@ -36,6 +37,8 @@ The app does not need to be installed. To remove it, close the app and delete th
 - Windows 10 or Windows 11
 - Codex CLI with `codex app-server`
 - ChatGPT sign-in for Codex authentication
+
+For normal users, `AutoCruiseSetup.exe` is the AutoCruise Bootstrapper. It can check the runtime, install Node.js LTS through winget, prepare Codex through `npx`, and launch AutoCruise CE.
 
 Install Codex CLI:
 
@@ -90,6 +93,8 @@ build_windows.bat
 This creates:
 
 - `release\AutoCruiseCE\AutoCruiseCE.exe`
+- `release\AutoCruiseCE\AutoCruiseSetup.exe`
+- `release\AutoCruiseSetup.exe`
 - `release\AutoCruiseCE-portable-1.3.0.zip`
 
 `release/` is intentionally excluded from Git tracking. Publish the zip through GitHub Releases.

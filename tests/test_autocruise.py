@@ -4232,6 +4232,8 @@ class AutoCruiseTests(unittest.TestCase):
 
     def test_windows_distribution_files_exist(self) -> None:
         spec_path = ROOT / "AutoCruise.spec"
+        setup_spec_path = ROOT / "AutoCruiseSetup.spec"
+        setup_bootstrapper_path = ROOT / "setup_bootstrapper.py"
         batch_path = ROOT / "build_windows.bat"
         icon_path = ROOT / "autocruise_logo.ico"
         screenshot_path = ROOT / "docs" / "ui-renewal-home.png"
@@ -4240,10 +4242,15 @@ class AutoCruiseTests(unittest.TestCase):
         spec_text = spec_path.read_text(encoding="utf-8")
 
         self.assertTrue(spec_path.exists())
+        self.assertTrue(setup_spec_path.exists())
+        self.assertTrue(setup_bootstrapper_path.exists())
         self.assertTrue(batch_path.exists())
         self.assertFalse((ROOT / "installer").exists())
         self.assertTrue(icon_path.exists())
         self.assertIn("PyInstaller", spec_text)
+        self.assertIn("AutoCruiseSetup", setup_spec_path.read_text(encoding="utf-8"))
+        self.assertIn("OpenJS.NodeJS.LTS", setup_bootstrapper_path.read_text(encoding="utf-8"))
+        self.assertIn("AutoCruise Bootstrapper", setup_bootstrapper_path.read_text(encoding="utf-8"))
         self.assertIn("version=version_info", spec_text)
         self.assertIn("optimize=1", spec_text)
         self.assertIn("docs", spec_text)
@@ -4255,9 +4262,9 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIn("autocruise_logo.ico", spec_text)
         self.assertIn("autocruise_logo.png", spec_text)
         self.assertIn("Compress-Archive", batch_text)
+        self.assertIn("AutoCruiseSetup.exe", batch_text)
         self.assertNotIn("iscc", batch_text.lower())
         self.assertNotIn("Inno Setup", batch_text)
-        self.assertNotIn("Setup.exe", batch_text)
         self.assertIn("AutoCruiseCE.exe", batch_text)
         self.assertIn("%RELEASE_DIR%\\AutoCruise", batch_text)
         self.assertNotIn("ensure_bundled_runtime", batch_text)
@@ -4265,6 +4272,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertTrue(screenshot_path.exists())
         self.assertIn("docs/ui-renewal-home.png", readme_text)
         self.assertIn("release\\AutoCruiseCE\\AutoCruiseCE.exe", readme_text)
+        self.assertIn("AutoCruiseSetup.exe", readme_text)
         self.assertIn("portable", readme_text.lower())
         self.assertIn("There is no installer.", readme_text)
         self.assertIn("Codex App Server", readme_text)

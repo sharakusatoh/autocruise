@@ -5,6 +5,7 @@ cd /d "%~dp0"
 
 set "APP_NAME=AutoCruiseCE"
 set "SPEC_FILE=%~dp0AutoCruise.spec"
+set "SETUP_SPEC_FILE=%~dp0AutoCruiseSetup.spec"
 set "RELEASE_DIR=%~dp0release"
 set "BUILD_ROOT=%~dp0build"
 set "BUILD_DIR=%~dp0build\pyinstaller"
@@ -22,6 +23,9 @@ if exist "%RELEASE_DIR%\AutoCruise" (
 )
 if exist "%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip" (
   del /q "%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip"
+)
+if exist "%RELEASE_DIR%\AutoCruiseSetup.exe" (
+  del /q "%RELEASE_DIR%\AutoCruiseSetup.exe"
 )
 for %%F in ("%RELEASE_DIR%\AutoCruise-portable-*.zip") do (
   if exist "%%~fF" del /q "%%~fF"
@@ -62,6 +66,15 @@ if errorlevel 1 (
 
 copy /Y "%~dp0README.md" "%RELEASE_DIR%\%APP_NAME%\README.md" >nul
 
+echo Building AutoCruiseSetup...
+python -m PyInstaller --noconfirm --clean "%SETUP_SPEC_FILE%" --distpath "%RELEASE_DIR%" --workpath "%BUILD_DIR%\setup"
+if errorlevel 1 (
+  echo Setup build failed.
+  exit /b 1
+)
+
+copy /Y "%RELEASE_DIR%\AutoCruiseSetup.exe" "%RELEASE_DIR%\%APP_NAME%\AutoCruiseSetup.exe" >nul
+
 echo Creating portable ZIP...
 powershell -NoProfile -Command "Compress-Archive -Path '%RELEASE_DIR%\%APP_NAME%' -DestinationPath '%RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip' -Force"
 if errorlevel 1 (
@@ -84,6 +97,8 @@ echo.
 echo Build completed.
 echo Double-click this file to start:
 echo %RELEASE_DIR%\%APP_NAME%\AutoCruiseCE.exe
+echo Setup helper:
+echo %RELEASE_DIR%\AutoCruiseSetup.exe
 echo Portable package:
 echo %RELEASE_DIR%\%APP_NAME%-portable-%APP_VERSION%.zip
 

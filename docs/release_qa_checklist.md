@@ -7,14 +7,17 @@ Use this checklist before shipping a Windows build. Record the build path, date,
 - Run `python -m unittest discover -s tests -v`.
 - Run `build_windows.bat`.
 - Confirm `release\AutoCruiseCE\AutoCruiseCE.exe` starts.
+- Confirm `release\AutoCruiseCE\AutoCruiseSetup.exe` starts.
+- Confirm `release\AutoCruiseSetup.exe` exists as the standalone AutoCruise Bootstrapper.
 - Confirm `release\AutoCruiseCE-portable-<version>.zip` exists.
-- Confirm no installer folder or setup executable is produced.
+- Confirm no installer folder or legacy installer executable is produced.
 - Confirm `autocruise\infrastructure\windows\uia_client.ps1` is present in the release folder.
 - Confirm Playwright or browser binaries are not bundled by default.
 
 ## Runtime
 
 - Open Settings and confirm Codex App Server status is visible.
+- Run AutoCruiseSetup and confirm the AutoCruise Bootstrapper reports Node.js/npm/npx/Codex availability without crashing.
 - Sign in with ChatGPT and run the connection test.
 - Confirm the fixed Codex model displays as `gpt-5.5`, and reasoning effort plus planning response size can be saved and restored.
 - Confirm Japanese language selection persists after restart.
