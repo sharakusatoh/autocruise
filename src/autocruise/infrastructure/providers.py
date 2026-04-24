@@ -7,6 +7,7 @@ from pathlib import Path
 
 from autocruise.domain.models import ProviderSettings, ProviderTestResult
 from autocruise.infrastructure.codex_app_server import CodexAppServerConnection, CodexAppServerError
+from autocruise.infrastructure.codex_models import DEFAULT_CODEX_MODEL
 
 
 REDACTION_PATTERNS = (
@@ -61,8 +62,6 @@ class CodexProviderClient(ProviderClient):
     def __init__(self, workspace_root: Path, app_server: CodexAppServerConnection | None = None) -> None:
         self.workspace_root = workspace_root
         self.app_server = app_server or CodexAppServerConnection(workspace_root)
-        self._active_session_key = ""
-        self._active_thread_id = ""
 
     def test_connection(self, settings: ProviderSettings, api_key: str) -> ProviderTestResult:
         _ = api_key
@@ -103,7 +102,9 @@ class CodexProviderClient(ProviderClient):
         if account.auth_mode != "chatgpt":
             raise ProviderError("Codex is not signed in with ChatGPT. Open Settings and choose Sign in with ChatGPT.")
 
-        thread_id, transient = self._thread_for_session(settings, session_key)
+        _ = session_key
+        model = DEFAULT_CODEX_MODEL
+        thread_id = self.app_server.start_thread(model, self.workspace_root)
         input_items = [{"type": "text", "text": f"{instructions}\n\n{prompt}"}]
         if image_path:
             input_items.append({"type": "localImage", "path": str(Path(image_path).resolve())})
@@ -112,7 +113,7 @@ class CodexProviderClient(ProviderClient):
             return self.app_server.run_turn(
                 thread_id,
                 input_items=input_items,
-                model=settings.model or "gpt-5.4",
+                model=model,
                 cwd=self.workspace_root,
                 effort=(settings.reasoning_effort or "medium"),
                 service_tier=(settings.service_tier or "auto"),
@@ -122,19 +123,7 @@ class CodexProviderClient(ProviderClient):
         except CodexAppServerError as exc:
             raise ProviderError("Codex could not complete the request.", str(exc)) from exc
         finally:
-            if transient:
-                self.app_server.unsubscribe_thread(thread_id)
-
-    def _thread_for_session(self, settings: ProviderSettings, session_key: str | None) -> tuple[str, bool]:
-        normalized_key = (session_key or "").strip()
-        if not normalized_key:
-            return self.app_server.start_thread(settings.model or "gpt-5.4", self.workspace_root), True
-        if normalized_key != self._active_session_key:
-            if self._active_thread_id:
-                self.app_server.unsubscribe_thread(self._active_thread_id)
-            self._active_thread_id = self.app_server.start_thread(settings.model or "gpt-5.4", self.workspace_root)
-            self._active_session_key = normalized_key
-        return self._active_thread_id, False
+            self.app_server.unsubscribe_thread(thread_id)
 
 
 def _write_connection_probe_image() -> Path:

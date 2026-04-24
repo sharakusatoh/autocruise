@@ -10,6 +10,7 @@ import time
 import unittest
 import ctypes
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -82,6 +83,7 @@ from autocruise.infrastructure.windows.observation_builder import WindowsObserva
 from autocruise.infrastructure.windows.primary_sensor import match_expected_signals
 from autocruise.infrastructure.windows.screenshot_provider import ScreenshotProvider, gdi32, user32 as screenshot_user32
 from autocruise.infrastructure.windows.shell_executor import ShellExecutor
+from autocruise.infrastructure.windows.task_scheduler import TaskSchedulerError, WindowsTaskSchedulerService, schedule_next_run
 from autocruise.infrastructure.windows.uia_adapter import UIAAdapter
 from autocruise.infrastructure.windows.uia_client import UiaClientLayer
 from autocruise.infrastructure.windows.visual_guidance import annotate_image, build_visual_guide_state
@@ -107,6 +109,7 @@ from autocruise.presentation.ui.pages.settings_page import SettingsPage
 from autocruise.presentation.ui.theme import build_stylesheet
 from autocruise.presentation.ui.shell import (
     FloatingControlWidget,
+    MainWindow,
     build_product_footer,
     button_text_with_shortcut,
     compact_panel_copy,
@@ -946,7 +949,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1009,7 +1012,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1071,7 +1074,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1145,7 +1148,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1225,7 +1228,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1308,7 +1311,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1370,7 +1373,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1428,6 +1431,97 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIn("search_terms", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
         self.assertIn("backend_hint", client.output_schema["properties"]["action"]["properties"]["target"]["properties"])
 
+    def test_live_planner_prompt_prioritizes_smart_windows_operator_stack(self) -> None:
+        settings = type(
+            "Settings",
+            (),
+            {
+                "provider": "codex",
+                "base_url": "codex app-server",
+                "model": "gpt-5.5",
+                "timeout_seconds": 30,
+                "retry_count": 0,
+                "max_tokens": 500,
+                "allow_images": True,
+                "is_default": True,
+            },
+        )()
+        client = RecordingProviderClient(
+            json.dumps(
+                {
+                    "summary": "Read workbook cells.",
+                    "is_complete": False,
+                    "action": {
+                        "type": "shell_execute",
+                        "target": {},
+                        "purpose": "Read Excel through COM.",
+                        "reason": "Excel exposes an object model.",
+                        "preconditions": [],
+                        "expected_outcome": "Cell data is returned.",
+                        "risk_level": "low",
+                        "confidence": 0.8,
+                        "text": "",
+                        "hotkey": "",
+                        "scroll_amount": 0,
+                        "shell_kind": "powershell",
+                        "shell_command": "$excel = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')",
+                        "shell_timeout_seconds": 20,
+                    },
+                }
+            )
+        )
+
+        class RecordingRegistry:
+            def get(self, provider: str):
+                _ = provider
+                return client
+
+        planner = LiveActionPlanner(
+            provider_repo=FakeProviderRepo(settings),
+            secret_store=FakeSecretStore(""),
+            provider_registry=RecordingRegistry(),
+        )
+        observation = Observation(
+            screenshot_path=None,
+            active_window=WindowInfo(window_id=1, title="Book1 - Excel", class_name="XLMAIN"),
+            visible_windows=[WindowInfo(window_id=1, title="Book1 - Excel", class_name="XLMAIN")],
+            detected_elements=[],
+            ui_tree_summary="Excel workbook is active.",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Excel", "Workbook"],
+            recent_actions=[],
+            raw_ref={
+                "observation_kind": ObservationKind.STRUCTURED.value,
+                "vision_fallback_required": False,
+                "automation": {
+                    "priority": [
+                        "app_object_model",
+                        "browser_playwright",
+                        "browser_cdp",
+                        "powershell_cim_wmi",
+                        "uia",
+                        "msaa",
+                        "win32_message",
+                        "vision_keyboard_mouse",
+                    ],
+                    "available_direct_layers": ["app_object_model", "powershell_cim_wmi", "uia"],
+                },
+            },
+        )
+
+        planner.plan("Read the selected Excel cells", observation, [], {"session_id": "session-smart"})
+
+        payload = json.loads(client.prompt)
+        self.assertEqual(payload["automation"]["priority"][0], "app_object_model")
+        self.assertIn("browser_playwright", payload["automation"]["priority"])
+        self.assertIn("powershell_cim_wmi", payload["automation"]["priority"])
+        self.assertIn("Office/app object task", " ".join(payload["direct_control_guidance"]))
+        self.assertIn("PowerShell COM/Object Model", client.instructions)
+        self.assertIn("CIM/WMI", client.instructions)
+        self.assertIn("Win32 messages", client.instructions)
+        self.assertIn("final fallback", client.instructions)
+
     def test_live_planner_prompt_includes_save_flags_without_repeat_guard(self) -> None:
         settings = type(
             "Settings",
@@ -1435,7 +1529,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1549,7 +1643,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1619,7 +1713,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1763,7 +1857,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1843,7 +1937,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1874,7 +1968,7 @@ class AutoCruiseTests(unittest.TestCase):
             {
                 "provider": "codex",
                 "base_url": "codex app-server",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "timeout_seconds": 30,
                 "retry_count": 0,
                 "max_tokens": 500,
@@ -1903,7 +1997,7 @@ class AutoCruiseTests(unittest.TestCase):
         providers = repository.load()
         self.assertEqual([item.provider for item in providers], ["codex"])
         self.assertEqual(providers[0].base_url, "codex app-server")
-        self.assertEqual(providers[0].model, "gpt-5.4")
+        self.assertEqual(providers[0].model, "gpt-5.5")
         self.assertEqual(providers[0].reasoning_effort, "medium")
         self.assertEqual(providers[0].timeout_seconds, 180)
         self.assertEqual(providers[0].retry_count, 0)
@@ -1944,7 +2038,7 @@ class AutoCruiseTests(unittest.TestCase):
         providers = ProviderSettingsRepository(self.paths).load()
         self.assertEqual([item.provider for item in providers], ["codex"])
         self.assertEqual(providers[0].base_url, "codex app-server")
-        self.assertEqual(providers[0].model, "gpt-5.4")
+        self.assertEqual(providers[0].model, "gpt-5.5")
         self.assertEqual(providers[0].reasoning_effort, "medium")
         self.assertEqual(providers[0].timeout_seconds, 180)
         self.assertEqual(providers[0].retry_count, 0)
@@ -1952,7 +2046,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(providers[0].service_tier, "auto")
         self.assertTrue(providers[0].allow_images)
 
-    def test_provider_repository_preserves_codex_model_and_effort(self) -> None:
+    def test_provider_repository_forces_codex_model_and_preserves_effort(self) -> None:
         settings_path = self.paths.provider_settings_path()
         settings_path.write_text(
             json.dumps(
@@ -1975,7 +2069,7 @@ class AutoCruiseTests(unittest.TestCase):
             encoding="utf-8",
         )
         provider = ProviderSettingsRepository(self.paths).get_default()
-        self.assertEqual(provider.model, "gpt-5.4-mini")
+        self.assertEqual(provider.model, "gpt-5.5")
         self.assertEqual(provider.reasoning_effort, "low")
         self.assertEqual(provider.max_tokens, 768)
         self.assertEqual(provider.service_tier, "fast")
@@ -2035,6 +2129,51 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("ChatGPT", result.message)
 
+    def test_codex_provider_starts_fresh_thread_for_every_turn(self) -> None:
+        class FakeAppServer:
+            def __init__(self) -> None:
+                self.started: list[str] = []
+                self.start_models: list[str] = []
+                self.ran: list[str] = []
+                self.run_models: list[str] = []
+                self.unsubscribed: list[str] = []
+
+            def read_account(self, refresh_token: bool = False):
+                _ = refresh_token
+                return codex_app_server_module.CodexAccountState(
+                    auth_mode="chatgpt",
+                    requires_openai_auth=True,
+                )
+
+            def start_thread(self, model: str, cwd: Path) -> str:
+                _ = cwd
+                thread_id = f"thread-{len(self.started) + 1}"
+                self.started.append(thread_id)
+                self.start_models.append(model)
+                return thread_id
+
+            def run_turn(self, thread_id: str, **kwargs) -> str:
+                self.ran.append(thread_id)
+                self.run_models.append(str(kwargs.get("model", "")))
+                return "OK"
+
+            def unsubscribe_thread(self, thread_id: str) -> None:
+                self.unsubscribed.append(thread_id)
+
+        settings = ProviderSettingsRepository(self.paths).get_default()
+        app_server = FakeAppServer()
+        client = CodexProviderClient(self.temp_dir, app_server)
+
+        first = client.generate_text(settings, "", "instructions", "prompt", session_key="same-session")
+        second = client.generate_text(settings, "", "instructions", "prompt", session_key="same-session")
+
+        self.assertEqual((first, second), ("OK", "OK"))
+        self.assertEqual(app_server.started, ["thread-1", "thread-2"])
+        self.assertEqual(app_server.start_models, ["gpt-5.5", "gpt-5.5"])
+        self.assertEqual(app_server.ran, ["thread-1", "thread-2"])
+        self.assertEqual(app_server.run_models, ["gpt-5.5", "gpt-5.5"])
+        self.assertEqual(app_server.unsubscribed, ["thread-1", "thread-2"])
+
     def test_provider_registry_rejects_custom_provider(self) -> None:
         registry = ProviderRegistry(self.temp_dir)
         with self.assertRaises(ProviderError):
@@ -2068,8 +2207,8 @@ class AutoCruiseTests(unittest.TestCase):
         connection.request = lambda method, params, timeout_seconds=45: {
             "data": [
                 {
-                    "id": "gpt-5.4",
-                    "displayName": "gpt-5.4",
+                    "id": "gpt-5.5",
+                    "displayName": "gpt-5.5",
                     "supportedReasoningEfforts": [
                         {"reasoningEffort": "low"},
                         {"reasoningEffort": "medium"},
@@ -2087,7 +2226,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(len(models), 1)
         self.assertEqual(models[0].supported_reasoning_efforts, ["low", "medium", "high", "xhigh"])
         self.assertEqual(models[0].supported_service_tiers, ["auto", "fast"])
-        self.assertEqual(models[0].display_name, "gpt-5.4")
+        self.assertEqual(models[0].display_name, "gpt-5.5")
 
     def test_codex_thread_uses_full_access_without_approval(self) -> None:
         captured: dict[str, object] = {}
@@ -2099,7 +2238,7 @@ class AutoCruiseTests(unittest.TestCase):
             return {"thread": {"id": "thread-1"}}
 
         connection.request = fake_request  # type: ignore[method-assign]
-        thread_id = connection.start_thread("gpt-5.4", self.temp_dir)
+        thread_id = connection.start_thread("gpt-5.5", self.temp_dir)
         self.assertEqual(thread_id, "thread-1")
         params = captured["params"]
         self.assertEqual(params["approvalPolicy"], "never")
@@ -2116,7 +2255,7 @@ class AutoCruiseTests(unittest.TestCase):
         result = connection.run_turn(
             "thread-1",
             input_items=[{"type": "text", "text": "hello"}],
-            model="gpt-5.4",
+            model="gpt-5.5",
             cwd=self.temp_dir,
         )
 
@@ -2410,7 +2549,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertFalse(payload["max_steps_limit_enabled"])
         self.assertIsNone(payload["max_steps_per_session"])
 
-    def test_settings_page_ai_payload_tracks_service_tier_by_model(self) -> None:
+    def test_settings_page_ai_payload_keeps_codex_model_fixed(self) -> None:
         page = SettingsPage()
         page.set_codex_values(
             command="codex app-server",
@@ -2419,25 +2558,28 @@ class AutoCruiseTests(unittest.TestCase):
             result="",
             can_sign_in=False,
             can_sign_out=True,
-            model="gpt-5.4",
+            model="gpt-5.5",
             reasoning_effort="medium",
             service_tier="fast",
             max_tokens=2048,
-            model_options=[("gpt-5.4", "gpt-5.4"), ("GPT-5.4-Mini", "gpt-5.4-mini")],
+            model_options=[("gpt-5.5", "gpt-5.5"), ("GPT-5.4-Mini", "gpt-5.4-mini")],
             effort_catalog={
-                "gpt-5.4": ["low", "medium", "high", "xhigh"],
+                "gpt-5.5": ["low", "medium", "high", "xhigh"],
                 "gpt-5.4-mini": ["low", "medium", "high"],
             },
             service_tier_catalog={
-                "gpt-5.4": ["auto", "fast"],
+                "gpt-5.5": ["auto", "fast"],
                 "gpt-5.4-mini": ["auto"],
             },
         )
         self.assertEqual(page.service_tier_combo.count(), 2)
+        self.assertFalse(page.model_combo.isEnabled())
+        self.assertEqual(page.ai_payload()["model"], "gpt-5.5")
         self.assertEqual(page.ai_payload()["service_tier"], "fast")
         page.model_combo.setCurrentText("gpt-5.4-mini")
-        self.assertEqual(page.service_tier_combo.count(), 1)
-        self.assertEqual(page.service_tier_combo.currentData(), "auto")
+        self.assertEqual(page.ai_payload()["model"], "gpt-5.5")
+        self.assertEqual(page.service_tier_combo.count(), 2)
+        self.assertEqual(page.service_tier_combo.currentData(), "fast")
 
     def test_windows_fallback_planner_keeps_progressing(self) -> None:
         toolset = self._make_windows_toolset()
@@ -2690,7 +2832,9 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertIn("SearchEditBox", observation.textual_hints)
         self.assertIn("screen_bounds", observation.raw_ref)
         self.assertEqual(observation.raw_ref["visual_guides"]["cursor_position"]["x"], 320)
-        self.assertEqual(observation.raw_ref["automation"]["priority"][0], "uia")
+        self.assertEqual(observation.raw_ref["automation"]["priority"][0], "app_object_model")
+        self.assertIn("powershell_cim_wmi", observation.raw_ref["automation"]["available_direct_layers"])
+        self.assertIn("vision_keyboard_mouse", observation.raw_ref["automation"]["available_direct_layers"])
         self.assertTrue(observation.raw_ref["automation"]["availability"]["uia"])
         self.assertFalse(observation.raw_ref["automation"]["availability"]["playwright"])
 
@@ -3915,6 +4059,97 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(items[0]["weekday"], "Monday")
         self.assertIn("Weekly", items[0]["summary"])
         self.assertEqual(items[0]["tone"], "error")
+
+    def test_schedule_next_run_moves_current_minute_to_future(self) -> None:
+        job = ScheduledJob(
+            task_id="daily_report",
+            instruction="Prepare the daily report.",
+            run_at="09:00",
+            recurrence=ScheduleKind.DAILY,
+            enabled=True,
+        )
+
+        scheduled = schedule_next_run(job, reference=datetime(2026, 4, 24, 9, 0, 30))
+
+        self.assertEqual(scheduled.next_run_at, "2026-04-25T09:00")
+
+    def test_schedule_next_run_keeps_remaining_random_daily_slots(self) -> None:
+        job = ScheduledJob(
+            task_id="random_daily",
+            instruction="Run a random daily check.",
+            run_at="09:00",
+            recurrence=ScheduleKind.RANDOM_DAILY,
+            enabled=True,
+            random_runs_per_day=3,
+            planned_run_times=[
+                "2026-04-24T10:00",
+                "2026-04-24T15:00",
+                "2026-04-24T20:00",
+            ],
+        )
+
+        scheduled = schedule_next_run(job, reference=datetime(2026, 4, 24, 10, 0), consume_current=True)
+
+        self.assertEqual(scheduled.next_run_at, "2026-04-24T15:00")
+        self.assertEqual(scheduled.planned_run_times, ["2026-04-24T15:00", "2026-04-24T20:00"])
+
+    def test_task_scheduler_rejects_jobs_without_future_run_time(self) -> None:
+        service = WindowsTaskSchedulerService()
+        job = ScheduledJob(
+            task_id="expired_once",
+            instruction="Expired task.",
+            run_at="2026-04-23T09:00",
+            recurrence=ScheduleKind.ONCE,
+            enabled=True,
+        )
+
+        with self.assertRaises(TaskSchedulerError):
+            service._trigger_expression(job)
+
+    def test_completed_once_schedule_is_disabled_and_not_registered_again(self) -> None:
+        class RecordingRepo:
+            def __init__(self) -> None:
+                self.saved: list[ScheduledJob] = []
+
+            def upsert(self, job: ScheduledJob) -> ScheduledJob:
+                self.saved.append(job)
+                return job
+
+        class RecordingScheduler:
+            def __init__(self) -> None:
+                self.registered: list[ScheduledJob] = []
+
+            def register_job(self, job: ScheduledJob, execute: str, arguments: str, working_directory: str) -> None:
+                _ = execute, arguments, working_directory
+                self.registered.append(job)
+
+        class FakeWindow:
+            def __init__(self, paths: WorkspacePaths) -> None:
+                self.paths = paths
+                self.job_repo = RecordingRepo()
+                self.task_scheduler = RecordingScheduler()
+
+            def _scheduler_command(self, task_id: str):
+                _ = task_id
+                return "AutoCruiseCE.exe", "--run-task expired_once", str(self.paths.root)
+
+            def _log_schedule_event(self, task_id: str, event_type: str, message: str) -> None:
+                _ = task_id, event_type, message
+
+        fake = FakeWindow(self.paths)
+        job = ScheduledJob(
+            task_id="expired_once",
+            instruction="Expired one-time task.",
+            run_at="2026-04-23T09:00",
+            recurrence=ScheduleKind.ONCE,
+            enabled=True,
+        )
+
+        MainWindow._reschedule_recurring_job(fake, job, consume_current=True)
+
+        self.assertFalse(fake.job_repo.saved[-1].enabled)
+        self.assertEqual(fake.job_repo.saved[-1].next_run_at, "")
+        self.assertEqual(fake.task_scheduler.registered, [])
 
     def test_load_session_detail_formats_history_without_creating_capture_folder(self) -> None:
         set_locale("en")

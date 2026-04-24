@@ -11,20 +11,25 @@ from pathlib import Path
 from typing import Any
 
 from autocruise.domain.models import ProviderSettings, ScheduleKind, ScheduledJob, ScheduledJobState, utc_now
+from autocruise.infrastructure.codex_models import (
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_REASONING_EFFORT,
+    DEFAULT_CODEX_SERVICE_TIER,
+)
 
 
 DEFAULT_PROVIDER_SETTINGS: list[ProviderSettings] = [
     ProviderSettings(
         provider="codex",
         base_url="codex app-server",
-        model="gpt-5.4",
-        reasoning_effort="medium",
+        model=DEFAULT_CODEX_MODEL,
+        reasoning_effort=DEFAULT_CODEX_REASONING_EFFORT,
         timeout_seconds=180,
         retry_count=0,
         max_tokens=2048,
         allow_images=True,
         is_default=True,
-        service_tier="auto",
+        service_tier=DEFAULT_CODEX_SERVICE_TIER,
     ),
 ]
 
@@ -441,6 +446,8 @@ class ProviderSettingsRepository:
         return normalized
 
     def _normalize_model(self, provider: str, model: str) -> str:
+        if provider == "codex":
+            return DEFAULT_CODEX_MODEL
         normalized = (model or "").strip()
         return normalized or self._default_for(provider).model
 

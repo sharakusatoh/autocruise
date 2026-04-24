@@ -46,6 +46,12 @@ from autocruise.infrastructure.codex_app_server import (
     CodexModelProfile,
     read_cached_auth_mode,
 )
+from autocruise.infrastructure.codex_models import (
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_MODEL_LABEL,
+    DEFAULT_CODEX_REASONING_EFFORTS,
+    DEFAULT_CODEX_SERVICE_TIERS,
+)
 from autocruise.infrastructure.automation import AutomationRouter
 from autocruise.infrastructure.browser.playwright_adapter import PlaywrightAdapter
 from autocruise.infrastructure.browser.sensor import BrowserSensorHub
@@ -964,6 +970,25 @@ class MainWindow(QMainWindow):
         )
         self.job_repo.upsert(updated)
         if not updated.enabled or not updated.next_run_at:
+            if updated.enabled:
+                updated = ScheduledJob(
+                    task_id=updated.task_id,
+                    instruction=updated.instruction,
+                    run_at=updated.run_at,
+                    recurrence=updated.recurrence,
+                    enabled=False,
+                    last_result=updated.last_result,
+                    last_message=updated.last_message,
+                    last_run_at=updated.last_run_at,
+                    weekdays=updated.weekdays,
+                    interval_minutes=updated.interval_minutes,
+                    random_runs_per_day=updated.random_runs_per_day,
+                    next_run_at="",
+                    planned_run_times=[],
+                    created_at=updated.created_at,
+                    updated_at=utc_now(),
+                )
+                self.job_repo.upsert(updated)
             return
         try:
             execute, arguments, working_directory = self._scheduler_command(updated.task_id)
@@ -1343,6 +1368,9 @@ class MainWindow(QMainWindow):
             updated_at=utc_now(),
         )
         job = schedule_next_run(job)
+        if not job.next_run_at:
+            self._show_notice(tr("message.schedule_future_required"), tone="warning")
+            return
         try:
             execute, arguments, working_directory = self._scheduler_command(task_id)
             self.task_scheduler.register_job(job, execute, arguments, working_directory)
@@ -1366,6 +1394,9 @@ class MainWindow(QMainWindow):
             return
         try:
             updated = schedule_next_run(job)
+            if not updated.next_run_at:
+                self._show_notice(tr("message.schedule_future_required"), tone="warning")
+                return
             updated = ScheduledJob(
                 task_id=updated.task_id,
                 instruction=updated.instruction,
@@ -1591,22 +1622,15 @@ class MainWindow(QMainWindow):
                 self._codex_models = self._codex_models or []
 
     def _model_options(self, current_model: str) -> list[tuple[str, str]]:
-        if not self._codex_models:
-            normalized = current_model or "gpt-5.4"
-            return [(normalized, normalized)]
-        options = [
-            (profile.display_name or profile.model_id, profile.model_id)
-            for profile in sorted(self._codex_models, key=lambda item: (not item.is_default, item.display_name or item.model_id))
-        ]
-        if current_model and current_model not in {value for _, value in options}:
-            options.append((current_model, current_model))
-        return options
+        _ = current_model
+        return [(DEFAULT_CODEX_MODEL_LABEL, DEFAULT_CODEX_MODEL)]
 
     def _effort_options(self, model: str) -> list[str]:
+        _ = model
         for profile in self._codex_models:
-            if profile.model_id == model and profile.supported_reasoning_efforts:
+            if profile.model_id == DEFAULT_CODEX_MODEL and profile.supported_reasoning_efforts:
                 return profile.supported_reasoning_efforts
-        return ["low", "medium", "high", "xhigh"]
+        return DEFAULT_CODEX_REASONING_EFFORTS
 
     def _effort_catalog(self) -> dict[str, list[str]]:
         return {
@@ -1615,10 +1639,11 @@ class MainWindow(QMainWindow):
         }
 
     def _service_tier_options(self, model: str) -> list[str]:
+        _ = model
         for profile in self._codex_models:
-            if profile.model_id == model and profile.supported_service_tiers:
+            if profile.model_id == DEFAULT_CODEX_MODEL and profile.supported_service_tiers:
                 return profile.supported_service_tiers
-        return ["auto"]
+        return DEFAULT_CODEX_SERVICE_TIERS
 
     def _service_tier_catalog(self) -> dict[str, list[str]]:
         return {
@@ -1721,7 +1746,7 @@ class MainWindow(QMainWindow):
         updated = type(current)(
             provider=current.provider,
             base_url=current.base_url,
-            model=payload["model"] or current.model,
+            model=DEFAULT_CODEX_MODEL,
             reasoning_effort=payload["reasoning_effort"],
             timeout_seconds=current.timeout_seconds,
             retry_count=current.retry_count,
@@ -1893,7 +1918,8 @@ class MainWindow(QMainWindow):
         window_manager = WindowManager()
         uia_adapter = UIAAdapter()
         browser_sensor = BrowserSensorHub()
-        automation_router = AutomationRouter([uia_adapter, PlaywrightAdapter(browser_sensor.page())])
+        playwright_adapter = PlaywrightAdapter(browser_sensor.page)
+        automation_router = AutomationRouter([playwright_adapter, uia_adapter])
         return WindowsAgentToolset(
             root=self.paths.root,
             observation_builder=WindowsObservationBuilder(

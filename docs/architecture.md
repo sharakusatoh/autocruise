@@ -13,15 +13,16 @@ AutoCruise CE is a Windows desktop application for autonomous GUI operation. The
 - PowerShell is used only for the Microsoft UI Automation client layer where .NET UIA APIs are the most direct Windows path.
 - PyInstaller produces the portable Windows folder used for releases.
 
-### Why Structured Automation First
+### Why Smart Windows Operator First
 
-Desktop automation is not reliable if every step depends on image coordinates. AutoCruise CE therefore prefers structured adapters before vision:
+Desktop automation is not reliable if every step depends on screenshots and coordinates. AutoCruise CE therefore chooses the richest direct control surface available before falling back to visual input:
 
-1. UIA for native Windows controls, element properties, and control patterns.
-2. Win32 for screenshots, windows, pointer, keyboard, clipboard, and global hotkeys.
-3. Playwright only when an integration supplies a live browser page object.
-4. CDP DOM / Accessibility / Input domains only as a browser fallback.
-5. Vision for remaining areas such as canvases, custom-rendered controls, and coordinate-level drawing.
+- App-specific APIs and object models first. Microsoft Office tasks should use COM/Object Model access for workbooks, cells, documents, messages, calendars, selections, and attachments before touching the UI.
+- Browser automation for Edge, Chrome, Chromium, and web apps. Playwright locators are preferred, with CDP DOM / Runtime / Network / Input / Event domains as targeted fallback.
+- PowerShell CIM/WMI and native management cmdlets for OS and administration data such as processes, services, devices, network state, registry, installed software, and settings.
+- UIA for normal Windows desktop apps without a richer app API.
+- MSAA or targeted Win32 messages for legacy controls when UIA is weak and the exact control/message is known.
+- Vision, OCR, screenshots, raw keyboard, mouse, and coordinates only as the final fallback.
 
 Playwright and browser binaries are optional and are not bundled in the standard package.
 
@@ -55,6 +56,7 @@ Playwright and browser binaries are optional and are not bundled in the standard
 - `infrastructure/windows/*`
 - `infrastructure/browser/*`
 - Codex connection, JSON/JSONL/YAML storage, screenshot capture, window enumeration, UIA client layer, Win32 input execution, optional Playwright/CDP adapters, and visual guidance.
+- Codex model selection is fixed to `gpt-5.5`; stored provider settings are normalized to that model before use.
 
 ## State Machine
 
@@ -84,16 +86,15 @@ Rules:
 
 1. Interpret the user goal.
 2. Select the constitution, selected system prompt, and custom instruction files.
-3. Capture a screenshot and visible window state.
-4. Query UIA for root, focused element, active-window descendants, and target candidates.
-5. Add optional Playwright/CDP state when a connected browser page is available.
-6. Build the observation payload for Codex.
-7. Ask Codex for the next action.
-8. Re-observe in `PRECHECK`.
-9. Resolve the target through UIA / browser adapter / visual target fallback.
-10. Execute one action through the best available backend.
-11. Re-observe in `POSTCHECK`.
-12. Validate visible progress, replan, complete, or stop with an issue record.
+3. Capture the active Windows state, structured automation state, and screenshot fallback evidence.
+4. Query the direct-control stack: app object models, browser automation, OS management APIs, UIA, and legacy control paths where available.
+5. Build the observation payload for Codex.
+6. Ask Codex for the next action.
+7. Re-observe in `PRECHECK`.
+8. Resolve the target through the best available direct backend before visual fallback.
+9. Execute one action through the best available backend.
+10. Re-observe in `POSTCHECK`.
+11. Validate visible progress, replan, complete, or stop with an issue record.
 
 ## Automation Interface
 
@@ -138,16 +139,18 @@ If locator operations fail and CDP is available, the adapter can use CDP `DOM`, 
 
 ## Prompt Context Model
 
-Priority order:
+Prompt sources:
 
-1. Constitution
-2. Session mission
-3. Selected system prompt
-4. User custom prompt and custom prompt files
-5. Runtime observation
-6. Recent execution context
+- Constitution
+- Selected system prompt
+- User custom prompt and custom prompt files
 
-No other bundled prompt-source categories are loaded into the model context in this edition.
+Runtime inputs:
+
+- Current session mission
+- Current screen observation
+
+Session history, thread history, audit logs, execution logs, and learning-memory sources are not loaded into the model context in this edition. Each Codex App Server call starts a fresh thread.
 
 ## Logging and Storage
 
@@ -170,7 +173,7 @@ The settings screen includes:
 - Pause and stop hotkeys
 - Codex App Server status
 - ChatGPT sign-in / sign-out
-- Codex model
+- Fixed Codex model: `gpt-5.5`
 - Reasoning effort
 - Planning response size
 - Screenshot retention

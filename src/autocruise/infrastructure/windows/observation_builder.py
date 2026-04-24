@@ -15,6 +15,29 @@ from autocruise.infrastructure.windows.window_manager import WindowManager
 
 TRANSIENT_RAW_REF_KEYS = ("last_execution",)
 
+SMART_OPERATOR_PRIORITY = [
+    "app_object_model",
+    "browser_playwright",
+    "browser_cdp",
+    "powershell_cim_wmi",
+    "uia",
+    "msaa",
+    "win32_message",
+    "vision_keyboard_mouse",
+]
+
+OFFICE_WINDOW_HINTS = (
+    "excel",
+    "xlmain",
+    "word",
+    "winword",
+    "opusapp",
+    "powerpoint",
+    "pptframeclass",
+    "outlook",
+    "rctrl_renwnd32",
+)
+
 
 class WindowsObservationBuilder:
     def __init__(
@@ -164,6 +187,27 @@ class WindowsObservationBuilder:
         browser_snapshot = sensor_snapshot.metadata.get("browser", {}) if sensor_snapshot is not None else {}
         uia_available = bool(automation_elements or elements or focused)
         playwright_available = bool(browser_snapshot.get("available"))
+        active_evidence = " ".join(
+            [
+                active_window.title if active_window else "",
+                active_window.class_name if active_window else "",
+                str(browser_snapshot.get("title", "")),
+                str(browser_snapshot.get("url", "")),
+            ]
+        ).casefold()
+        office_object_available = any(hint in active_evidence for hint in OFFICE_WINDOW_HINTS)
+        browser_context_available = playwright_available
+        available_direct_layers = self._available_direct_layers(
+            office_object_available=office_object_available,
+            browser_context_available=browser_context_available,
+            uia_available=uia_available,
+        )
+        automation_source = self._automation_source(
+            office_object_available=office_object_available,
+            playwright_available=playwright_available,
+            browser_context_available=browser_context_available,
+            uia_available=uia_available,
+        )
         summary = self._summarize(active_window, elements, visible_windows, cursor_position, sensor_snapshot, browser_snapshot)
         change_summary = self._change_summary(previous_observation, active_window, focused, elements, browser_snapshot)
         carried_raw_ref = self._carry_forward_raw_ref(previous_observation)
@@ -193,15 +237,24 @@ class WindowsObservationBuilder:
                 "change_summary": change_summary,
                 "planner_skip_reason": "",
                 "automation": {
-                    "priority": ["uia", "playwright", "cdp", "vision"],
-                    "source": "playwright" if playwright_available else ("uia" if uia_available else "vision_fallback"),
+                    "priority": SMART_OPERATOR_PRIORITY,
+                    "source": automation_source,
+                    "available_direct_layers": available_direct_layers,
+                    "fallback_rule": "Use screenshots, OCR, keyboard, mouse, and coordinates only after app APIs, browser automation, OS management APIs, UIA, MSAA, and Win32 messages are unavailable or insufficient.",
                     "availability": {
+                        "app_object_model": office_object_available,
+                        "browser_playwright": playwright_available,
+                        "browser_cdp": browser_context_available,
+                        "powershell_cim_wmi": True,
                         "uia": uia_available,
                         "playwright": playwright_available,
                         "cdp": playwright_available,
-                        "vision_fallback": not (uia_available or playwright_available),
+                        "msaa": False,
+                        "win32_message": False,
+                        "vision_keyboard_mouse": True,
+                        "vision_fallback": not (office_object_available or browser_context_available or uia_available),
                     },
-                    "vision_fallback_allowed": not (uia_available or playwright_available),
+                    "vision_fallback_allowed": not (office_object_available or browser_context_available or uia_available),
                     "elements": numbered_automation_elements[:20],
                 },
                 "screen_understanding": {
@@ -221,6 +274,42 @@ class WindowsObservationBuilder:
             if key in previous_observation.raw_ref:
                 carried[key] = previous_observation.raw_ref[key]
         return carried
+
+    def _available_direct_layers(
+        self,
+        *,
+        office_object_available: bool,
+        browser_context_available: bool,
+        uia_available: bool,
+    ) -> list[str]:
+        layers: list[str] = []
+        if office_object_available:
+            layers.append("app_object_model")
+        if browser_context_available:
+            layers.extend(["browser_playwright", "browser_cdp"])
+        layers.append("powershell_cim_wmi")
+        if uia_available:
+            layers.append("uia")
+        layers.append("vision_keyboard_mouse")
+        return layers
+
+    def _automation_source(
+        self,
+        *,
+        office_object_available: bool,
+        playwright_available: bool,
+        browser_context_available: bool,
+        uia_available: bool,
+    ) -> str:
+        if office_object_available:
+            return "app_object_model"
+        if playwright_available:
+            return "browser_playwright"
+        if browser_context_available:
+            return "browser_cdp"
+        if uia_available:
+            return "uia"
+        return "vision_keyboard_mouse"
 
     def _numbered_automation_elements(self, elements) -> list[dict]:
         numbered: list[dict] = []

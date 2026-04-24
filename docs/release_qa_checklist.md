@@ -1,6 +1,6 @@
 # AutoCruise CE Release QA Checklist
 
-Use this checklist before shipping a Windows build. Record the build path, date, tester, and result in diagnostics or the release QA memo.
+Use this checklist before shipping a Windows build. Record the build path, date, tester, and result in diagnostics or the release QA record.
 
 ## Build
 
@@ -16,12 +16,12 @@ Use this checklist before shipping a Windows build. Record the build path, date,
 
 - Open Settings and confirm Codex App Server status is visible.
 - Sign in with ChatGPT and run the connection test.
-- Confirm model, reasoning effort, and planning response size can be saved and restored.
+- Confirm the fixed Codex model displays as `gpt-5.5`, and reasoning effort plus planning response size can be saved and restored.
 - Confirm Japanese language selection persists after restart.
 
 ## Desktop Operation
 
-- Run `ペイントを開いて、簡単な猫の絵を描いてください。`.
+- Run a Paint smoke task that opens Paint and draws a simple cat picture.
 - Confirm Paint launches through a direct Windows path such as Run, visible launcher, or search.
 - Confirm the agent waits for the Paint window and canvas.
 - Confirm click, drag, and curve-like multi-point drawing work on the canvas.

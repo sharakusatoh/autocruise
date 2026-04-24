@@ -40,6 +40,36 @@ CONTEXTUAL_RUN_ALIASES = {
     "vscode": {"display": "Visual Studio Code", "command": "code", "terms": ("vscode", "visual studio code", "vs code")},
 }
 
+SMART_OPERATOR_PRIORITY = [
+    "app_object_model",
+    "browser_playwright",
+    "browser_cdp",
+    "powershell_cim_wmi",
+    "uia",
+    "msaa",
+    "win32_message",
+    "vision_keyboard_mouse",
+]
+
+SMART_OPERATOR_POLICY = (
+    "Use the smart Windows operator control stack before visual input. "
+    "If a target app exposes an object model or app-specific API, use it first. "
+    "For Microsoft Office tasks, prefer shell_execute with PowerShell COM/Object Model such as Excel.Application, "
+    "Word.Application, PowerPoint.Application, or Outlook.Application to read and modify workbooks, cells, documents, "
+    "mail, calendars, selections, and attachments directly before using the UI. "
+    "For Edge, Chrome, Chromium, and web apps, use Playwright locators or CDP DOM/Runtime/Network/Input/Event "
+    "operations before UIA or coordinates; set target.backend_hint to playwright or cdp for browser element actions. "
+    "For OS and administration work involving processes, services, devices, network, registry, system settings, "
+    "or installed software, prefer shell_execute powershell with CIM/WMI and native management cmdlets such as "
+    "Get-CimInstance, Invoke-CimMethod, Get-Service, Get-Process, Get-Net*, Get-ItemProperty, Set-ItemProperty, "
+    "Start-Service, Stop-Service, or Restart-Service. "
+    "For ordinary Windows desktop apps without a richer API, use UI Automation patterns first: Invoke, Value, "
+    "Selection, SelectionItem, Toggle, ExpandCollapse, Scroll, Text, and Window. "
+    "Use MSAA or Win32 messages only for legacy controls when UIA is weak and the target control/message is known. "
+    "Use screenshots, OCR, coordinate clicks, raw keyboard, and mouse gestures only as the final fallback when direct "
+    "APIs, browser automation, OS management APIs, UIA, and targeted legacy control paths are unavailable or insufficient. "
+)
+
 
 class LiveActionPlanner:
     def __init__(
@@ -116,6 +146,7 @@ class LiveActionPlanner:
             "Act autonomously without requesting user confirmation. "
             "Always think at two levels: the overall objective route and the immediate next step. "
             "Treat browsers like any other Windows application. "
+            f"{SMART_OPERATOR_POLICY}"
             "If the requested app is not open, launch it immediately using a reliable Windows path. "
             "For known Windows apps with a direct executable alias, prefer shell_execute with shell_kind process before using Win+R or Search. "
             f"{launch_hint}"
@@ -123,7 +154,7 @@ class LiveActionPlanner:
             "If one launcher path fails, switch to another direct path on the next step. "
             "If the app is starting, use wait only until the target UI is visible. "
             "Once the app is open, continue with the next concrete step such as selecting a tool, focusing a field, typing text, or drawing on a canvas. "
-            "Use whichever combination of mouse, keyboard, menus, ribbons, toolbars, dialogs, shortcuts, and visible text gets to the goal fastest. "
+            "Use direct APIs, browser automation, OS management APIs, UIA, legacy control APIs, menus, ribbons, toolbars, dialogs, shortcuts, and visible text in that order when applicable. "
             "Use shell_execute when a terminal or direct process launch is faster and more reliable than GUI interaction. "
             "Prefer shell_execute for development tasks, repository inspection, tests, builds, file-system bulk operations, and direct executable launch. "
             "Use shell_kind powershell for Windows shell commands, cmd for cmd-style commands, and process to launch an executable directly. "
@@ -156,9 +187,9 @@ class LiveActionPlanner:
             "For Paint tasks, after the window appears, choose Pencil or Brush and build the sketch in visible subgoals such as head outline, ears, face, body, and tail. "
             "For business tasks, prefer standard shortcuts, clearly labeled controls, and the fastest direct route before deeper navigation. "
             "Save, export, send, or submit when that is the obvious completion state for the user's goal. "
-            "The request may include a real desktop screenshot of the current screen. When a screenshot is available, use it as the primary visual truth. "
-            "Prefer structured automation data before visual guessing: UI Automation on Windows, then Playwright locators for browser pages, then CDP, then vision fallback. "
-            "Use vision-only coordinates only for regions that UIA, Playwright, and CDP cannot expose. "
+            "The request may include a real desktop screenshot of the current screen. Use it as trustworthy visual confirmation and fallback evidence. "
+            "Treat screenshots as confirmation and fallback evidence, not as the first control surface when a direct layer is available. "
+            "Use vision-only coordinates only for regions that app APIs, browser automation, OS APIs, UIA, MSAA, or Win32 messages cannot expose. "
             "The screenshot may include a cursor marker and an active-window outline. "
             "Treat those overlays and the structured visual_guides payload as trustworthy hints about global Windows screen coordinates. "
             "If visual_guides are present, remember that screenshot pixel (0,0) maps to the reported screen origin, not always to global (0,0). "
@@ -166,12 +197,12 @@ class LiveActionPlanner:
             "When screenshot input is unavailable, rely on the UI automation summary and textual hints instead. "
             "If the sensor snapshot is unchanged, reuse the structured observation and keep moving. "
             "Always populate expected_signals with the cheapest observable UI changes for the chosen action. "
-            "Prefer signals that UIA, Playwright, or CDP can verify before using vision_change. "
+            "Prefer signals that app APIs, PowerShell output, UIA, Playwright, or CDP can verify before using vision_change. "
             "When screen_understanding.ui_candidates is present, prefer those numbered UI candidates before visual guessing. "
             "Treat screen_understanding.ocr_text_blocks as a separate channel from UI automation data. "
             "If there is no exact target, choose the most progress-making action: focus the likely window, click a "
             "clearly labeled control, type into a visible edit field, use a launcher shortcut, scroll, or wait briefly. "
-            "Prefer UI automation targets, labeled controls, shortcuts, visual hints, then coordinates. "
+            "Prefer direct APIs, browser locators, OS management commands, UI automation targets, labeled controls, shortcuts, visual hints, then coordinates. "
             "Return only valid JSON matching the provided output schema."
         )
         selected_prompt = self._selected_system_prompt_text(context)
@@ -264,6 +295,7 @@ class LiveActionPlanner:
         save_requested = self._save_requested(goal, context)
         save_dialog_visible = self._save_dialog_visible(observation)
         save_path_hint = self._save_path_hint(goal) if save_requested else ""
+        automation_priority = automation.get("priority") or SMART_OPERATOR_PRIORITY
         knowledge = []
         if context:
             for selection in context.selections[:4]:
@@ -286,6 +318,7 @@ class LiveActionPlanner:
                     "confirmation_policy",
                     "Use autonomous judgment. Keep executing until the goal is complete.",
                 ),
+                "direct_control_guidance": self._direct_control_guidance(goal, observation, automation),
                 "step_count": planning_meta.get("step_count", 0),
                 "recent_failure_reason": planning_meta.get("recent_failure_reason", ""),
                 "text_authoring_goal": text_authoring_goal,
@@ -307,8 +340,13 @@ class LiveActionPlanner:
                 "cursor_position": {"x": observation.cursor_position[0], "y": observation.cursor_position[1]},
                 "visual_guides": visual_guides,
                 "automation": {
-                    "priority": automation.get("priority", ["uia", "playwright", "cdp", "vision"]),
+                    "priority": automation_priority,
                     "source": automation.get("source", ""),
+                    "available_direct_layers": automation.get("available_direct_layers", []),
+                    "fallback_rule": automation.get(
+                        "fallback_rule",
+                        "Use screenshots, OCR, keyboard, mouse, and coordinates only after direct APIs, browser automation, OS management APIs, UIA, MSAA, and Win32 messages are unavailable or insufficient.",
+                    ),
                     "vision_fallback_allowed": automation.get("vision_fallback_allowed", True),
                     "elements": (automation.get("elements") or [])[:8],
                 },
@@ -356,6 +394,47 @@ class LiveActionPlanner:
             },
             ensure_ascii=False,
         )
+
+    def _direct_control_guidance(self, goal: str, observation: Observation, automation: dict[str, Any]) -> list[str]:
+        evidence = " ".join(
+            [
+                goal,
+                observation.active_window.title if observation.active_window else "",
+                observation.active_window.class_name if observation.active_window else "",
+                observation.ui_tree_summary,
+                observation.focused_element,
+                *observation.textual_hints[:12],
+            ]
+        ).casefold()
+        available = set(automation.get("available_direct_layers") or [])
+        guidance: list[str] = []
+        office_terms = ("excel", "word", "powerpoint", "power point", "outlook", "office", "workbook", "worksheet", "cell", "document", "mail")
+        browser_terms = ("edge", "chrome", "chromium", "browser", "http://", "https://", "web app", "website", "dom")
+        os_admin_terms = (
+            "process",
+            "service",
+            "device",
+            "network",
+            "registry",
+            "setting",
+            "installed",
+            "driver",
+            "startup",
+            "task scheduler",
+            "windows update",
+        )
+        if any(term in evidence for term in office_terms) or "app_object_model" in available:
+            guidance.append(
+                "Office/app object task: use shell_execute powershell with the app COM/Object Model before UI controls when reading or editing app data."
+            )
+        if any(term in evidence for term in browser_terms) or {"browser_playwright", "browser_cdp"} & available:
+            guidance.append("Web task: use Playwright locators or CDP DOM/Runtime/Network/Input/Event operations before UIA or coordinate input.")
+        if any(term in evidence for term in os_admin_terms) or "powershell_cim_wmi" in available:
+            guidance.append("OS/admin task: use PowerShell CIM/WMI or native management cmdlets before opening GUI settings panels.")
+        if "uia" in available:
+            guidance.append("Desktop UI task: use UIA patterns before keyboard, mouse, screenshot, or coordinate fallback.")
+        guidance.append("Fallback rule: use screenshots, OCR, coordinate clicks, raw keyboard, and mouse only after the direct layers are unavailable or insufficient.")
+        return guidance
 
     def _extract_requested_text(self, goal: str) -> str:
         quoted = [item.strip() for item in re.findall(r'["“”「『](.*?)["”」』]', goal, flags=re.DOTALL) if item.strip()]

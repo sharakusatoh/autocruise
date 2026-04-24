@@ -3,6 +3,14 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
+from autocruise.infrastructure.codex_models import (
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_MODEL_LABEL,
+    DEFAULT_CODEX_REASONING_EFFORT,
+    DEFAULT_CODEX_REASONING_EFFORTS,
+    DEFAULT_CODEX_SERVICE_TIER,
+    DEFAULT_CODEX_SERVICE_TIERS,
+)
 from autocruise.infrastructure.windows.global_hotkeys import HOTKEY_OPTIONS
 from autocruise.presentation.labels import tr
 from autocruise.presentation.ui.components import AppButton, AppComboBox, AppLineEdit, Card, SectionHeader, ThinScrollBar
@@ -138,7 +146,8 @@ class SettingsPage(QWidget):
         self.model_combo = AppComboBox()
         self.model_combo.setEditable(False)
         self.model_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.model_combo.addItem("gpt-5.4", "gpt-5.4")
+        self.model_combo.addItem(DEFAULT_CODEX_MODEL_LABEL, DEFAULT_CODEX_MODEL)
+        self.model_combo.setEnabled(False)
 
         self.effort_label = QLabel(tr("label.reasoning_effort"))
         self.effort_label.setProperty("role", "body")
@@ -286,18 +295,18 @@ class SettingsPage(QWidget):
     def _populate_effort_combo(self, options: list[str] | None = None) -> None:
         current = self.effort_combo.currentData()
         self.effort_combo.clear()
-        efforts = options or ["low", "medium", "high", "xhigh"]
+        efforts = options or DEFAULT_CODEX_REASONING_EFFORTS
         for effort in efforts:
             self.effort_combo.addItem(self._label_for_effort(effort), effort)
-        self.effort_combo.setCurrentIndex(self._find_index(self.effort_combo, current or "medium"))
+        self.effort_combo.setCurrentIndex(self._find_index(self.effort_combo, current or DEFAULT_CODEX_REASONING_EFFORT))
 
     def _populate_service_tier_combo(self, options: list[str] | None = None) -> None:
         current = self.service_tier_combo.currentData()
         self.service_tier_combo.clear()
-        tiers = options or ["auto"]
+        tiers = options or DEFAULT_CODEX_SERVICE_TIERS
         for tier in tiers:
             self.service_tier_combo.addItem(self._label_for_service_tier(tier), tier)
-        self.service_tier_combo.setCurrentIndex(self._find_index(self.service_tier_combo, current or "auto"))
+        self.service_tier_combo.setCurrentIndex(self._find_index(self.service_tier_combo, current or DEFAULT_CODEX_SERVICE_TIER))
 
     def _populate_response_size_combo(self) -> None:
         current = self.response_size_combo.currentData()
@@ -347,9 +356,9 @@ class SettingsPage(QWidget):
         return normalized[:1].upper() + normalized[1:] if normalized else "Standard"
 
     def _sync_model_dependent_options(self) -> None:
-        model = (self.model_combo.currentData() or self.model_combo.currentText() or "").strip()
-        effort = self.effort_combo.currentData() or "medium"
-        service_tier = self.service_tier_combo.currentData() or "auto"
+        model = DEFAULT_CODEX_MODEL
+        effort = self.effort_combo.currentData() or DEFAULT_CODEX_REASONING_EFFORT
+        service_tier = self.service_tier_combo.currentData() or DEFAULT_CODEX_SERVICE_TIER
         self._populate_effort_combo(self._available_effort_options(model))
         self.effort_combo.setCurrentIndex(self._find_index(self.effort_combo, effort))
         self._populate_service_tier_combo(self._available_service_tier_options(model))
@@ -357,10 +366,10 @@ class SettingsPage(QWidget):
         self.service_tier_combo.setEnabled(self.service_tier_combo.count() > 1)
 
     def _available_effort_options(self, model: str) -> list[str]:
-        return self._model_effort_options.get(model, ["low", "medium", "high", "xhigh"])
+        return self._model_effort_options.get(model, DEFAULT_CODEX_REASONING_EFFORTS)
 
     def _available_service_tier_options(self, model: str) -> list[str]:
-        return self._model_service_tier_options.get(model, ["auto"])
+        return self._model_service_tier_options.get(model, DEFAULT_CODEX_SERVICE_TIERS)
 
     def set_general_values(
         self,
@@ -408,34 +417,26 @@ class SettingsPage(QWidget):
         self.auth_value.setText(auth_status)
         self.account_value.setText(account)
         self.ai_result.setText(result)
-        self._model_effort_options = dict(effort_catalog or {})
-        self._model_service_tier_options = dict(service_tier_catalog or {})
-        if model_options is not None:
-            current_text = model or self.model_combo.currentText() or "gpt-5.4"
-            self.model_combo.blockSignals(True)
-            self.model_combo.clear()
-            seen: set[str] = set()
-            for label, value in model_options:
-                if value in seen:
-                    continue
-                seen.add(value)
-                self.model_combo.addItem(label, value)
-            if current_text not in seen:
-                self.model_combo.addItem(current_text, current_text)
-            index = self._find_text_index(self.model_combo, current_text)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
-            self.model_combo.blockSignals(False)
-        else:
-            fallback_model = model or self.model_combo.currentData() or "gpt-5.4"
-            self.model_combo.setCurrentIndex(self._find_text_index(self.model_combo, fallback_model))
+        _ = model, model_options
+        self._model_effort_options = {DEFAULT_CODEX_MODEL: DEFAULT_CODEX_REASONING_EFFORTS}
+        self._model_service_tier_options = {DEFAULT_CODEX_MODEL: DEFAULT_CODEX_SERVICE_TIERS}
+        if effort_catalog and DEFAULT_CODEX_MODEL in effort_catalog:
+            self._model_effort_options[DEFAULT_CODEX_MODEL] = list(effort_catalog[DEFAULT_CODEX_MODEL])
+        if service_tier_catalog and DEFAULT_CODEX_MODEL in service_tier_catalog:
+            self._model_service_tier_options[DEFAULT_CODEX_MODEL] = list(service_tier_catalog[DEFAULT_CODEX_MODEL])
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItem(DEFAULT_CODEX_MODEL_LABEL, DEFAULT_CODEX_MODEL)
+        self.model_combo.setCurrentIndex(0)
+        self.model_combo.setEnabled(False)
+        self.model_combo.blockSignals(False)
         if effort_options is not None:
-            self._model_effort_options[self.model_combo.currentData() or model or "gpt-5.4"] = list(effort_options)
+            self._model_effort_options[DEFAULT_CODEX_MODEL] = list(effort_options)
         if service_tier_options is not None:
-            self._model_service_tier_options[self.model_combo.currentData() or model or "gpt-5.4"] = list(service_tier_options)
+            self._model_service_tier_options[DEFAULT_CODEX_MODEL] = list(service_tier_options)
         self._sync_model_dependent_options()
-        self.effort_combo.setCurrentIndex(self._find_index(self.effort_combo, reasoning_effort or "medium"))
-        self.service_tier_combo.setCurrentIndex(self._find_index(self.service_tier_combo, service_tier or "auto"))
+        self.effort_combo.setCurrentIndex(self._find_index(self.effort_combo, reasoning_effort or DEFAULT_CODEX_REASONING_EFFORT))
+        self.service_tier_combo.setCurrentIndex(self._find_index(self.service_tier_combo, service_tier or DEFAULT_CODEX_SERVICE_TIER))
         self._populate_response_size_combo()
         token_index = self._find_index(self.response_size_combo, max_tokens)
         if token_index == 0 and self.response_size_combo.itemData(0) != max_tokens:
@@ -463,9 +464,9 @@ class SettingsPage(QWidget):
 
     def ai_payload(self) -> dict:
         return {
-            "model": (self.model_combo.currentData() or self.model_combo.currentText() or "gpt-5.4").strip(),
-            "reasoning_effort": self.effort_combo.currentData() or "medium",
-            "service_tier": self.service_tier_combo.currentData() or "auto",
+            "model": DEFAULT_CODEX_MODEL,
+            "reasoning_effort": self.effort_combo.currentData() or DEFAULT_CODEX_REASONING_EFFORT,
+            "service_tier": self.service_tier_combo.currentData() or DEFAULT_CODEX_SERVICE_TIER,
             "max_tokens": int(self.response_size_combo.currentData() or 2048),
         }
 
@@ -488,9 +489,9 @@ class SettingsPage(QWidget):
         selected_autonomy = self.autonomy_combo.currentData() or "autonomous"
         selected_pause_hotkey = self.pause_hotkey_combo.currentData() or ""
         selected_stop_hotkey = self.stop_hotkey_combo.currentData() or ""
-        selected_effort = self.effort_combo.currentData() or "medium"
-        selected_service_tier = self.service_tier_combo.currentData() or "auto"
-        selected_model = self.model_combo.currentData() or self.model_combo.currentText() or "gpt-5.4"
+        selected_effort = self.effort_combo.currentData() or DEFAULT_CODEX_REASONING_EFFORT
+        selected_service_tier = self.service_tier_combo.currentData() or DEFAULT_CODEX_SERVICE_TIER
+        selected_model = DEFAULT_CODEX_MODEL
         self._populate_language_combo()
         self.language_combo.setCurrentIndex(self._find_index(self.language_combo, selected_language))
         self._populate_autonomy_combo()

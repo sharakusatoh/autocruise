@@ -52,7 +52,9 @@ if ($task) {{
         self._run(script)
 
     def _trigger_expression(self, job: ScheduledJob) -> str:
-        scheduled_at = job.next_run_at or job.run_at
+        scheduled_at = job.next_run_at
+        if not scheduled_at:
+            raise TaskSchedulerError("Scheduled job has no future run time.")
         return f"New-ScheduledTaskTrigger -Once -At ([datetime]'{self._ps_literal(scheduled_at)}')"
 
     def _time_text(self, value: str) -> str:
@@ -129,7 +131,8 @@ def schedule_next_run(job: ScheduledJob, *, reference: datetime | None = None, c
         next_run = _next_random_hourly(now).isoformat(timespec="minutes")
         planned = [next_run]
     elif job.recurrence == ScheduleKind.RANDOM_DAILY:
-        planned = _next_random_daily_runs(now, max(1, int(job.random_runs_per_day or 1)))
+        if not planned:
+            planned = _next_random_daily_runs(now, max(1, int(job.random_runs_per_day or 1)))
         next_run = planned[0] if planned else ""
 
     return ScheduledJob(
@@ -153,7 +156,10 @@ def schedule_next_run(job: ScheduledJob, *, reference: datetime | None = None, c
 
 def _normalize_reference(reference: datetime | None) -> datetime:
     current = reference or datetime.now()
-    return current.replace(second=0, microsecond=0, tzinfo=None)
+    current = current.replace(tzinfo=None)
+    if current.second or current.microsecond:
+        current = current.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return current.replace(second=0, microsecond=0)
 
 
 def _parse_time(value: str) -> time:
