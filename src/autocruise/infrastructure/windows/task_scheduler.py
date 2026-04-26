@@ -20,8 +20,8 @@ class WindowsTaskSchedulerService:
         script = f"""
 $ErrorActionPreference = 'Stop'
 $action = New-ScheduledTaskAction -Execute '{self._ps_literal(execute)}' -Argument '{self._ps_literal(arguments)}' -WorkingDirectory '{self._ps_literal(working_directory)}'
-$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType InteractiveToken -RunLevel LeastPrivilege
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -StartWhenAvailable
 $trigger = {trigger}
 Register-ScheduledTask -TaskName '{self._ps_literal(self.task_name(job.task_id))}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 if ({'$true' if job.enabled else '$false'} -eq $false) {{
@@ -47,6 +47,16 @@ $ErrorActionPreference = 'Stop'
 $task = Get-ScheduledTask -TaskName '{self._ps_literal(self.task_name(task_id))}' -ErrorAction SilentlyContinue
 if ($task) {{
     {command} -TaskName '{self._ps_literal(self.task_name(task_id))}' | Out-Null
+}}
+"""
+        self._run(script)
+
+    def stop_job(self, task_id: str) -> None:
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$task = Get-ScheduledTask -TaskName '{self._ps_literal(self.task_name(task_id))}' -ErrorAction SilentlyContinue
+if ($task -and $task.State -eq 'Running') {{
+    Stop-ScheduledTask -TaskName '{self._ps_literal(self.task_name(task_id))}' | Out-Null
 }}
 """
         self._run(script)

@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 import ctypes
+from collections import deque
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -117,6 +118,7 @@ from autocruise.presentation.ui.shell import (
     normalize_preferences,
     notice_label_style,
 )
+from autocruise.version import APP_VERSION
 
 
 def bootstrap_workspace(root: Path) -> WorkspacePaths:
@@ -579,6 +581,25 @@ class AutoCruiseTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.state, SessionState.PLANNING)
 
+    def test_state_machine_allows_initial_direct_planning(self) -> None:
+        machine = SessionStateMachine()
+        snapshot = machine.create("s1", SessionMission("Open Chrome"))
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.LOADING_CONTEXT,
+            LoadingContextData(goal="Open Chrome", stage="initial"),
+            "start",
+        )
+
+        snapshot = machine.transition(
+            snapshot,
+            SessionState.PLANNING,
+            PlanningData(goal="Open Chrome"),
+            "plan initial direct action",
+        )
+
+        self.assertEqual(snapshot.state, SessionState.PLANNING)
+
     def test_retrieval_uses_only_prompt_sources(self) -> None:
         planner = RetrievalPlanner(self.temp_dir)
         context = planner.retrieve("Clean this Excel spreadsheet", stage="initial")
@@ -783,6 +804,81 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertGreater(len(read_jsonl(self.paths.logs_dir / "execution_log.jsonl")), 0)
         self.assertGreater(len(read_jsonl(self.paths.logs_dir / "audit_log.jsonl")), 0)
         self.assertGreater(len(read_jsonl(self.paths.logs_dir / "session_history.jsonl")), 0)
+
+    def test_orchestrator_runs_initial_direct_action_before_observation(self) -> None:
+        class InitialDirectToolset:
+            def __init__(self) -> None:
+                self.capture_calls = 0
+                self.execute_capture_calls: int | None = None
+                self.observation = Observation(
+                    screenshot_path=None,
+                    active_window=WindowInfo(window_id=2, title="Chrome", class_name="Chrome_WidgetWin_1"),
+                    visible_windows=[WindowInfo(window_id=2, title="Chrome", class_name="Chrome_WidgetWin_1")],
+                    detected_elements=[],
+                    ui_tree_summary="Chrome window",
+                    cursor_position=(0, 0),
+                    focused_element="",
+                    textual_hints=["Chrome"],
+                    recent_actions=[],
+                )
+
+            def capture_observation(self, session_id, **kwargs):
+                self.capture_calls += 1
+                return self.observation
+
+            def list_windows(self):
+                return []
+
+            def focus_window(self, window_id: int) -> bool:
+                return True
+
+            def find_elements(self, query: str):
+                return []
+
+            def plan_initial_action(self, goal: str, context=None) -> PlanStep:
+                return PlanStep(
+                    summary="Open Chrome directly",
+                    action=Action(
+                        type=ActionType.SHELL_EXECUTE,
+                        target=TargetRef(window_title="Chrome", fallback_visual_hint="launch:chrome"),
+                        purpose="Open Chrome",
+                        reason="Known app launch does not need screen observation",
+                        preconditions=[],
+                        expected_outcome="Chrome opens",
+                        shell_kind="powershell",
+                        shell_command="Start-Process chrome.exe",
+                    ),
+                )
+
+            def plan_next_action(self, goal: str, observation, recent_actions, context=None) -> PlanStep:
+                return PlanStep(summary="Done", is_complete=True)
+
+            def verify_target(self, action: Action, observation):
+                return type("Verification", (), {"matched": True, "confidence": 1.0, "reason": ""})()
+
+            def execute_action(self, action: Action):
+                self.execute_capture_calls = self.capture_calls
+                return ExecutionResult(success=True, details="started", error="")
+
+            def wait_for_expected_change(self, session_id: str, action: Action, previous_observation, **kwargs):
+                return self.observation
+
+            def validate_outcome(self, expected_outcome: str, observation, previous_observation=None, action: Action | None = None):
+                return ValidationResult(True, 1.0, expected_outcome)
+
+            def abort_session(self, reason: str) -> None:
+                return None
+
+        toolset = InitialDirectToolset()
+        orchestrator = SessionOrchestrator(self.paths, toolset_factory=lambda: toolset)
+
+        result = orchestrator.run("Open Chrome and post to X.")
+
+        self.assertEqual(result.state, SessionState.COMPLETED)
+        self.assertEqual(toolset.execute_capture_calls, 0)
+        self.assertEqual(toolset.capture_calls, 1)
+        execution_log = read_jsonl(self.paths.logs_dir / "execution_log.jsonl")
+        self.assertEqual(execution_log[0]["action"]["target"]["fallback_visual_hint"], "launch:chrome")
 
     def test_load_structured_tolerates_invalid_json(self) -> None:
         path = self.paths.preferences_path()
@@ -3487,6 +3583,165 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertTrue(plan.action.shell_detach)
         self.assertEqual(plan.action.target.fallback_visual_hint, "launch:notepad")
 
+    def test_windows_toolset_launches_chrome_through_app_paths_for_x_goal(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="Open Chrome and post to X.",
+                stage="initial",
+                app_candidates=["chrome"],
+                task_candidates=[],
+                selections=[],
+            )
+        }
+        observation = Observation(
+            screenshot_path="desktop.png",
+            active_window=WindowInfo(window_id=1, title="Desktop"),
+            visible_windows=[WindowInfo(window_id=1, title="Desktop")],
+            detected_elements=[],
+            ui_tree_summary="Desktop visible",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Desktop"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action("Open Chrome and post to X.", observation, [], context)
+
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.shell_kind, "powershell")
+        self.assertIn("App Paths\\chrome.exe", plan.action.shell_command)
+        self.assertIn("https://x.com", plan.action.shell_command)
+        self.assertIn("--remote-debugging-port=9222", plan.action.shell_command)
+        self.assertFalse(plan.action.shell_detach)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "launch:chrome")
+
+    def test_windows_toolset_can_plan_initial_chrome_launch_without_observation(self) -> None:
+        toolset = self._make_windows_toolset()
+        context = {
+            "retrieved_context": RetrievedContext(
+                goal="Open Chrome and post to X.",
+                stage="initial",
+                app_candidates=["chrome"],
+                task_candidates=[],
+                selections=[],
+            )
+        }
+
+        plan = toolset.plan_initial_action("Open Chrome and post to X.", context)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.shell_kind, "powershell")
+        self.assertIn("App Paths\\chrome.exe", plan.action.shell_command)
+        self.assertIn("https://x.com", plan.action.shell_command)
+        self.assertIn("--remote-debugging-port=9222", plan.action.shell_command)
+        self.assertEqual(plan.action.wait_timeout_ms, 5000)
+
+    def test_windows_toolset_posts_to_x_with_cdp_after_browser_is_open(self) -> None:
+        toolset = self._make_windows_toolset()
+        observation = Observation(
+            screenshot_path="x.png",
+            active_window=WindowInfo(window_id=10, title="X - Google Chrome", class_name="Chrome_WidgetWin_1"),
+            visible_windows=[WindowInfo(window_id=10, title="X - Google Chrome", class_name="Chrome_WidgetWin_1")],
+            detected_elements=[],
+            ui_tree_summary="X home timeline in Chrome",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["x.com", "Home", "Post"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action('ChromeでXに「AutoCruise test」と書き込む', observation, [], {"retrieved_context": None})
+
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.target.fallback_visual_hint, "browser:x:post")
+        self.assertEqual(plan.action.target.backend_hint, "cdp")
+        self.assertIn("Runtime.evaluate", plan.action.shell_command)
+        self.assertIn("tweetTextarea_0", plan.action.shell_command)
+        self.assertIn("AutoCruise test", plan.action.shell_command)
+        self.assertIn("ClientWebSocket", plan.action.shell_command)
+
+    def test_windows_toolset_does_not_repeat_x_cdp_post_after_recent_attempt(self) -> None:
+        toolset = self._make_windows_toolset()
+        observation = Observation(
+            screenshot_path="x.png",
+            active_window=WindowInfo(window_id=10, title="X - Google Chrome", class_name="Chrome_WidgetWin_1"),
+            visible_windows=[WindowInfo(window_id=10, title="X - Google Chrome", class_name="Chrome_WidgetWin_1")],
+            detected_elements=[],
+            ui_tree_summary="X home timeline in Chrome",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["x.com", "Home", "Post"],
+            recent_actions=[],
+        )
+        recent = [
+            Action(
+                type=ActionType.SHELL_EXECUTE,
+                target=TargetRef(fallback_visual_hint="browser:x:post"),
+                purpose="post",
+                reason="post",
+                preconditions=[],
+                expected_outcome="posted",
+                shell_command="demo",
+            )
+        ]
+
+        plan = toolset.plan_next_action('ChromeでXに「AutoCruise test」と書き込む', observation, recent, {"retrieved_context": None})
+
+        self.assertNotEqual(plan.action.target.fallback_visual_hint, "browser:x:post")
+
+    def test_windows_toolset_can_plan_unknown_app_launch_without_observation(self) -> None:
+        toolset = self._make_windows_toolset()
+
+        plan = toolset.plan_initial_action("Open Slack and check unread messages.", {"retrieved_context": None})
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.shell_kind, "powershell")
+        self.assertEqual(plan.action.target.fallback_visual_hint, "launch:slack")
+        self.assertIn("$query = 'Slack'", plan.action.shell_command)
+        self.assertIn("App Paths", plan.action.shell_command)
+        self.assertIn("Start Menu", plan.action.shell_command)
+        self.assertIn("Get-StartApps", plan.action.shell_command)
+        self.assertIn("Get-Command", plan.action.shell_command)
+
+    def test_windows_toolset_extracts_unknown_app_from_japanese_goal(self) -> None:
+        toolset = self._make_windows_toolset()
+
+        plan = toolset.plan_initial_action("Obsidianで今日のメモを書く", {"retrieved_context": None})
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action.type, ActionType.SHELL_EXECUTE)
+        self.assertEqual(plan.action.target.name, "Obsidian")
+        self.assertIn("$query = 'Obsidian'", plan.action.shell_command)
+
+    def test_windows_toolset_skips_repeating_unknown_launch_after_failure(self) -> None:
+        toolset = self._make_windows_toolset()
+        observation = Observation(
+            screenshot_path="desktop.png",
+            active_window=WindowInfo(window_id=1, title="Desktop"),
+            visible_windows=[WindowInfo(window_id=1, title="Desktop")],
+            detected_elements=[],
+            ui_tree_summary="Desktop visible",
+            cursor_position=(0, 0),
+            focused_element="",
+            textual_hints=["Desktop"],
+            recent_actions=[],
+        )
+
+        plan = toolset.plan_next_action(
+            "Open Slack and check unread messages.",
+            observation,
+            [],
+            {"retrieved_context": None, "recent_failure_reason": "App not found: Slack"},
+        )
+
+        self.assertNotEqual(plan.action.target.fallback_visual_hint, "launch:slack")
+
     def test_windows_toolset_types_requested_text_into_active_notepad_without_waiting(self) -> None:
         toolset = self._make_windows_toolset()
         context = {
@@ -4058,7 +4313,28 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertEqual(items[0]["recurrence"], "weekly")
         self.assertEqual(items[0]["weekday"], "Monday")
         self.assertIn("Weekly", items[0]["summary"])
-        self.assertEqual(items[0]["tone"], "error")
+        self.assertEqual(items[0]["state_label"], "Disabled")
+        self.assertEqual(items[0]["result"], "Disabled")
+        self.assertEqual(items[0]["tone"], "approval")
+
+    def test_load_scheduled_jobs_marks_enabled_items_clearly(self) -> None:
+        repository = ScheduledJobRepository(self.paths)
+        repository.upsert(
+            ScheduledJob(
+                task_id="daily_report",
+                instruction="Prepare the daily report.",
+                run_at="09:00",
+                recurrence=ScheduleKind.DAILY,
+                enabled=True,
+                next_run_at="2026-04-25T09:00",
+            )
+        )
+
+        items = load_scheduled_jobs(self.paths)
+
+        self.assertEqual(items[0]["state_label"], "Enabled")
+        self.assertEqual(items[0]["result"], "Enabled")
+        self.assertEqual(items[0]["tone"], "done")
 
     def test_schedule_next_run_moves_current_minute_to_future(self) -> None:
         job = ScheduledJob(
@@ -4105,6 +4381,93 @@ class AutoCruiseTests(unittest.TestCase):
 
         with self.assertRaises(TaskSchedulerError):
             service._trigger_expression(job)
+
+    def test_task_scheduler_registers_interactive_principal(self) -> None:
+        class RecordingScheduler(WindowsTaskSchedulerService):
+            def __init__(self) -> None:
+                self.script = ""
+
+            def _run(self, script: str) -> None:
+                self.script = script
+
+        service = RecordingScheduler()
+        job = ScheduledJob(
+            task_id="future_once",
+            instruction="Future task.",
+            run_at="2026-04-25T09:00",
+            recurrence=ScheduleKind.ONCE,
+            enabled=True,
+            next_run_at="2026-04-25T09:00",
+        )
+
+        service.register_job(job, "AutoCruiseCE.exe", "--run-task future_once", str(self.paths.root))
+
+        self.assertIn("-LogonType Interactive", service.script)
+        self.assertIn("-RunLevel Limited", service.script)
+        self.assertIn("-StartWhenAvailable", service.script)
+        self.assertNotIn("InteractiveToken", service.script)
+        self.assertNotIn("LeastPrivilege", service.script)
+
+    def test_task_scheduler_stops_running_task_by_name(self) -> None:
+        class RecordingScheduler(WindowsTaskSchedulerService):
+            def __init__(self) -> None:
+                self.script = ""
+
+            def _run(self, script: str) -> None:
+                self.script = script
+
+        service = RecordingScheduler()
+
+        service.stop_job("future_once")
+
+        self.assertIn("Get-ScheduledTask", service.script)
+        self.assertIn("Stop-ScheduledTask", service.script)
+        self.assertIn("AutoCruise_future_once", service.script)
+        self.assertIn("$task.State -eq 'Running'", service.script)
+
+    def test_user_stop_disables_active_scheduled_task_and_clears_queue(self) -> None:
+        class RecordingScheduler:
+            def __init__(self) -> None:
+                self.stopped: list[str] = []
+                self.enabled: list[tuple[str, bool]] = []
+
+            def stop_job(self, task_id: str) -> None:
+                self.stopped.append(task_id)
+
+            def set_enabled(self, task_id: str, enabled: bool) -> None:
+                self.enabled.append((task_id, enabled))
+
+        class RecordingRepo:
+            def __init__(self) -> None:
+                self.enabled: list[tuple[str, bool]] = []
+
+            def set_enabled(self, task_id: str, enabled: bool) -> None:
+                self.enabled.append((task_id, enabled))
+
+        class FakeWindow:
+            def __init__(self) -> None:
+                self.task_scheduler = RecordingScheduler()
+                self.job_repo = RecordingRepo()
+                self.pending_task_queue = deque(["active_task", "queued_task"])
+                self.events: list[tuple[str, str, str]] = []
+                self.refreshed = False
+
+            def _log_schedule_event(self, task_id: str, event_type: str, message: str) -> None:
+                self.events.append((task_id, event_type, message))
+
+            def _refresh_schedules(self) -> None:
+                self.refreshed = True
+
+        fake = FakeWindow()
+
+        MainWindow._stop_schedule_for_user_stop(fake, "active_task")
+
+        self.assertEqual(fake.task_scheduler.stopped, ["active_task"])
+        self.assertEqual(fake.task_scheduler.enabled, [("active_task", False)])
+        self.assertEqual(fake.job_repo.enabled, [("active_task", False)])
+        self.assertEqual(list(fake.pending_task_queue), [])
+        self.assertEqual(fake.events[0][0:2], ("active_task", "stopped_by_user"))
+        self.assertTrue(fake.refreshed)
 
     def test_completed_once_schedule_is_disabled_and_not_registered_again(self) -> None:
         class RecordingRepo:
@@ -4236,7 +4599,8 @@ class AutoCruiseTests(unittest.TestCase):
         setup_bootstrapper_path = ROOT / "setup_bootstrapper.py"
         batch_path = ROOT / "build_windows.bat"
         icon_path = ROOT / "autocruise_logo.ico"
-        screenshot_path = ROOT / "docs" / "ui-preview-home-1.3.0.png"
+        screenshot_name = f"ui-preview-home-{APP_VERSION}.png"
+        screenshot_path = ROOT / "docs" / screenshot_name
         readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
         batch_text = batch_path.read_text(encoding="utf-8")
         spec_text = spec_path.read_text(encoding="utf-8")
@@ -4270,7 +4634,7 @@ class AutoCruiseTests(unittest.TestCase):
         self.assertNotIn("ensure_bundled_runtime", batch_text)
         self.assertIn("img.save", batch_text)
         self.assertTrue(screenshot_path.exists())
-        self.assertIn("docs/ui-preview-home-1.3.0.png", readme_text)
+        self.assertIn(f"docs/{screenshot_name}", readme_text)
         self.assertIn("release\\AutoCruiseCE\\AutoCruiseCE.exe", readme_text)
         self.assertIn("AutoCruiseSetup.exe", readme_text)
         self.assertIn("portable", readme_text.lower())

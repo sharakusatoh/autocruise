@@ -126,6 +126,7 @@ def load_scheduled_jobs(paths: WorkspacePaths) -> list[dict]:
     items: list[dict] = []
     for job in repository.list():
         summary = _schedule_summary(job)
+        state_label = _schedule_state_label(job)
         items.append(
             {
                 "task_id": job.task_id,
@@ -140,9 +141,9 @@ def load_scheduled_jobs(paths: WorkspacePaths) -> list[dict]:
                 "next_run_at": job.next_run_at,
                 "enabled": job.enabled,
                 "summary": summary,
-                "result": friendly_job_state(job.last_result.value),
-                "state_label": friendly_job_state(job.last_result.value),
-                "tone": _job_tone(job.last_result.value),
+                "result": state_label,
+                "state_label": state_label,
+                "tone": _schedule_tone(job),
                 "last_result_text": _last_result_text(job),
             }
         )
@@ -225,6 +226,22 @@ def _job_tone(value: str) -> str:
     if value in {"failed", "skipped"}:
         return "error"
     return "ready"
+
+
+def _schedule_state_label(job) -> str:
+    if not job.enabled:
+        return tr("value.shortcut_disabled")
+    if job.last_result.value == "running":
+        return friendly_job_state(job.last_result.value)
+    return tr("value.enabled")
+
+
+def _schedule_tone(job) -> str:
+    if not job.enabled:
+        return "approval"
+    if job.last_result.value == "running":
+        return "running"
+    return "done"
 
 
 def _last_result_text(job) -> str:

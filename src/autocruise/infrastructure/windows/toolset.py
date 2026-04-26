@@ -239,6 +239,9 @@ class WindowsAgentToolset:
         launch_step = self._plan_direct_app_launch(goal, observation, recent_actions, retrieved_context, planning_meta)
         if launch_step is not None:
             return self._with_wait_defaults(launch_step)
+        x_post_step = self._plan_x_post_action(goal, observation, recent_actions, retrieved_context, planning_meta)
+        if x_post_step is not None:
+            return self._with_wait_defaults(x_post_step)
         completion_step = self._complete_editor_goal_if_ready(goal, observation, recent_actions, retrieved_context)
         if self.live_planner is not None:
             live_plan = self.live_planner.plan(goal, observation, recent_actions, context)
@@ -384,6 +387,20 @@ class WindowsAgentToolset:
             ),
             reasoning="Fallback to a short wait instead of ending the session.",
         )
+
+    def plan_initial_action(self, goal: str, context=None) -> PlanStep | None:
+        retrieved_context, _planning_meta = self._normalize_context(context)
+        app_key = self._requested_launch_app(goal, retrieved_context)
+        if app_key:
+            strategy = str(APP_LAUNCH_SPECS[app_key].get("launch_strategy", "run_dialog") or "run_dialog").strip().lower()
+            if strategy != "process":
+                return None
+            return self._with_wait_defaults(self._plan_process_launch(app_key, goal))
+
+        app_query = self._requested_launch_query(goal, retrieved_context)
+        if not app_query:
+            return None
+        return self._with_wait_defaults(self._plan_generic_app_launch(app_query, goal))
 
     def verify_target(self, action: Action, observation: Observation) -> VerificationResult:
         if action.type == ActionType.DRAG:
@@ -821,12 +838,23 @@ class WindowsAgentToolset:
         if self._is_save_dialog_observation(observation):
             return None
         app_key = self._requested_launch_app(goal, retrieved_context)
-        if not app_key or self._observation_has_app(observation, app_key):
+        if not app_key:
+            app_query = self._requested_launch_query(goal, retrieved_context)
+            recent_failure_reason = self._normalize_text(planning_meta.get("recent_failure_reason", ""))
+            if (
+                not app_query
+                or self._observation_contains_terms(observation, [app_query])
+                or (recent_failure_reason and self._normalize_text(app_query) in recent_failure_reason)
+            ):
+                return None
+            return self._plan_generic_app_launch(app_query, goal)
+
+        if self._observation_has_app(observation, app_key):
             return None
 
         strategy = str(APP_LAUNCH_SPECS[app_key].get("launch_strategy", "run_dialog") or "run_dialog").strip().lower()
         if strategy == "process" and not self._should_fallback_launch_to_run_dialog(app_key, observation, planning_meta):
-            return self._plan_process_launch(app_key)
+            return self._plan_process_launch(app_key, goal)
 
         app_element = self._find_element_by_terms(observation.detected_elements, APP_LAUNCH_SPECS[app_key]["terms"])
         if app_element is not None and not self._recently_repeated(recent_actions, ActionType.CLICK, app_element.name):
@@ -885,10 +913,13 @@ class WindowsAgentToolset:
             return True
         return command in recent_failure_reason or self._normalize_text(app_key) in recent_failure_reason
 
-    def _plan_process_launch(self, app_key: str) -> PlanStep:
+    def _plan_process_launch(self, app_key: str, goal: str = "") -> PlanStep:
         spec = APP_LAUNCH_SPECS[app_key]
         display = spec["display"]
-        command = spec["command"]
+        shell_kind, command, detach = self._launch_shell_spec(app_key, goal)
+        expected_signals = []
+        if app_key in {"chrome", "edge"}:
+            expected_signals = [ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=display)]
         return PlanStep(
             summary=f"{display} を直接起動します。",
             action=Action(
@@ -903,11 +934,156 @@ class WindowsAgentToolset:
                 preconditions=["デスクトップで外部プロセスを起動できること"],
                 expected_outcome=f"{display} のウィンドウが表示されます。",
                 confidence=0.98,
-                shell_kind="process",
+                shell_kind=shell_kind,
                 shell_command=command,
-                shell_detach=True,
+                shell_detach=detach,
+                expected_signals=expected_signals,
+                wait_timeout_ms=5000,
             ),
             reasoning="A direct process launch is faster and avoids Run dialog focus problems.",
+        )
+
+    def _launch_shell_spec(self, app_key: str, goal: str) -> tuple[str, str, bool]:
+        spec = APP_LAUNCH_SPECS[app_key]
+        command = str(spec["command"])
+        if app_key in {"chrome", "edge"}:
+            exe_name = "chrome.exe" if app_key == "chrome" else "msedge.exe"
+            url = self._browser_url_for_goal(goal)
+            browser_args = ["--remote-debugging-port=9222", "--remote-allow-origins=*", "--new-window"]
+            if url:
+                browser_args.append(url)
+            argument_line = " -ArgumentList " + self._ps_array_literal(browser_args)
+            script = "\n".join(
+                [
+                    "$ErrorActionPreference = 'Stop'",
+                    "$appPath = ''",
+                    f"foreach ($key in @('HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}', 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}')) {{",
+                    "    try {",
+                    "        $candidate = (Get-ItemProperty -Path $key -ErrorAction Stop).'(default)'",
+                    "        if ($candidate -and (Test-Path -LiteralPath $candidate)) { $appPath = $candidate; break }",
+                    "    } catch {}",
+                    "}",
+                    f"if (-not $appPath) {{ $resolved = Get-Command {self._ps_single_quote(exe_name)} -ErrorAction SilentlyContinue; if ($resolved) {{ $appPath = $resolved.Source }} }}",
+                    f"if ($appPath) {{ Start-Process -FilePath $appPath{argument_line} }} else {{ Start-Process -FilePath {self._ps_single_quote(exe_name)}{argument_line} }}",
+                ]
+            )
+            return "powershell", script, False
+        return "process", command, True
+
+    def _browser_url_for_goal(self, goal: str) -> str:
+        normalized = self._normalize_text(goal)
+        if "x.com" in normalized or "twitter" in normalized:
+            if self._looks_like_social_post_goal(goal):
+                return "https://x.com/compose/post"
+            return "https://x.com"
+        if re.search(r"(^|[^a-z0-9])x([^a-z0-9]|$)", str(goal or ""), flags=re.IGNORECASE):
+            if self._looks_like_social_post_goal(goal):
+                return "https://x.com/compose/post"
+            return "https://x.com"
+        return ""
+
+    def _ps_single_quote(self, value: str) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _ps_array_literal(self, values: list[str]) -> str:
+        return "@(" + ", ".join(self._ps_single_quote(value) for value in values) + ")"
+
+    def _plan_generic_app_launch(self, app_query: str, goal: str = "") -> PlanStep:
+        display = self._generic_app_display(app_query)
+        command = self._generic_app_launch_command(app_query, goal)
+        marker = self._generic_app_marker(app_query)
+        return PlanStep(
+            summary=f"{display} をWindowsの登録情報から探して直接起動します。",
+            action=Action(
+                type=ActionType.SHELL_EXECUTE,
+                target=TargetRef(
+                    window_title=display,
+                    name=display,
+                    fallback_visual_hint=f"launch:{marker}",
+                    search_terms=[display],
+                ),
+                purpose=f"{display} を起動する",
+                reason="App Paths、スタートメニュー、Storeアプリ、PATHの順で実行可能な登録を探します。",
+                preconditions=["Windowsでアプリ登録または実行ファイルを検索できること"],
+                expected_outcome=f"{display} のウィンドウが表示されます。",
+                confidence=0.86,
+                shell_kind="powershell",
+                shell_command=command,
+                shell_detach=False,
+                shell_timeout_seconds=30,
+                expected_signals=[ExpectedSignal(ExpectedSignalKind.WINDOW_CHANGED, target=display)],
+                wait_timeout_ms=5000,
+            ),
+            reasoning="Unknown app names should be resolved through Windows registrations before falling back to visual operation.",
+        )
+
+    def _generic_app_launch_command(self, app_query: str, goal: str = "") -> str:
+        url = self._browser_url_for_goal(goal)
+        return "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                f"$query = {self._ps_single_quote(app_query)}",
+                f"$url = {self._ps_single_quote(url)}",
+                "function Convert-Key([string]$value) {",
+                "    if ($null -eq $value) { return '' }",
+                "    return ($value.ToLowerInvariant() -replace '[\\s\\._\\-]+', '')",
+                "}",
+                "$queryKey = Convert-Key $query",
+                "if (-not $queryKey) { throw 'App query is empty.' }",
+                "$candidates = @()",
+                "function Add-Candidate([string]$kind, [string]$name, [string]$path, [string]$appId, [int]$priority) {",
+                "    $nameKey = Convert-Key $name",
+                "    $pathKey = Convert-Key $path",
+                "    $score = 0",
+                "    if ($nameKey -eq $queryKey) { $score = 100 }",
+                "    elseif ($nameKey.StartsWith($queryKey)) { $score = 85 }",
+                "    elseif ($nameKey.Contains($queryKey)) { $score = 70 }",
+                "    elseif ($pathKey.Contains($queryKey)) { $score = 45 }",
+                "    if ($score -gt 0) {",
+                "        $script:candidates += [pscustomobject]@{ Kind = $kind; Name = $name; Path = $path; AppId = $appId; Score = $score; Priority = $priority }",
+                "    }",
+                "}",
+                "foreach ($root in @('HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths', 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths')) {",
+                "    try {",
+                "        Get-ChildItem -Path $root -ErrorAction Stop | ForEach-Object {",
+                "            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue",
+                "            $path = $props.'(default)'",
+                "            if ($path -and (Test-Path -LiteralPath $path)) {",
+                "                Add-Candidate 'AppPath' ([System.IO.Path]::GetFileNameWithoutExtension($_.PSChildName)) $path '' 40",
+                "            }",
+                "        }",
+                "    } catch {}",
+                "}",
+                "$programDirs = @(",
+                "    (Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs'),",
+                "    (Join-Path $env:ProgramData 'Microsoft\\Windows\\Start Menu\\Programs')",
+                ")",
+                "foreach ($dir in $programDirs) {",
+                "    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }",
+                "    Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue | ForEach-Object {",
+                "        Add-Candidate 'Shortcut' $_.BaseName $_.FullName '' 35",
+                "    }",
+                "}",
+                "try {",
+                "    Get-StartApps | ForEach-Object { Add-Candidate 'AppX' $_.Name '' $_.AppID 30 }",
+                "} catch {}",
+                "try {",
+                "    Get-Command -Name ($query + '*') -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object {",
+                "        Add-Candidate 'Command' ([System.IO.Path]::GetFileNameWithoutExtension($_.Name)) $_.Source '' 20",
+                "    }",
+                "} catch {}",
+                "$best = $candidates | Sort-Object @{ Expression = 'Score'; Descending = $true }, @{ Expression = 'Priority'; Descending = $true }, @{ Expression = { $_.Name.Length }; Ascending = $true } | Select-Object -First 1",
+                "if (-not $best) { throw ('App not found: ' + $query) }",
+                "$queryIsBrowser = (Convert-Key $query) -match '(firefox|brave|opera|vivaldi|browser)'",
+                "if ($best.Kind -eq 'AppX') {",
+                "    Start-Process -FilePath 'explorer.exe' -ArgumentList ('shell:AppsFolder\\' + $best.AppId)",
+                "} elseif ($url -and $queryIsBrowser) {",
+                "    Start-Process -FilePath $best.Path -ArgumentList $url",
+                "} else {",
+                "    Start-Process -FilePath $best.Path",
+                "}",
+                "Write-Output ('Started ' + $best.Kind + ': ' + $best.Name)",
+            ]
         )
 
     def _plan_run_dialog_launch(self, app_key: str, observation: Observation, recent_actions: list[Action]) -> PlanStep:
@@ -956,6 +1132,147 @@ class WindowsAgentToolset:
             reasoning="Typing the executable alias is the direct Run dialog launch path.",
         )
 
+    def _plan_x_post_action(
+        self,
+        goal: str,
+        observation: Observation,
+        recent_actions: list[Action],
+        retrieved_context,
+        planning_meta: dict[str, Any],
+    ) -> PlanStep | None:
+        _ = retrieved_context
+        if not self._looks_like_x_goal(goal) or not self._looks_like_social_post_goal(goal):
+            return None
+        if not self._observation_contains_terms(observation, ["x.com", "twitter", "chrome", "edge"]):
+            return None
+        post_text = self._social_post_text(goal)
+        if not post_text:
+            return None
+        recent_failure = self._normalize_text(planning_meta.get("recent_failure_reason", ""))
+        if recent_failure and "devtoolsprotocol" in recent_failure and "unavailable" in recent_failure:
+            return None
+        marker = "browser:x:post"
+        if any(action.type == ActionType.SHELL_EXECUTE and action.target.fallback_visual_hint == marker for action in recent_actions[-2:]):
+            return None
+        return PlanStep(
+            summary="Xの投稿欄へDevTools Protocolで直接書き込みます。",
+            action=Action(
+                type=ActionType.SHELL_EXECUTE,
+                target=TargetRef(
+                    window_title="X",
+                    name="X post composer",
+                    fallback_visual_hint=marker,
+                    search_terms=["tweetTextarea_0", "Post text", "Tweet text", "ポスト"],
+                    backend_hint="cdp",
+                ),
+                purpose="Xの投稿欄に本文を入力して投稿する",
+                reason="Webアプリの入力欄は画面座標ではなくDOM/DevTools Protocolで扱う方が安定します。",
+                preconditions=["ChromeまたはEdgeがDevTools Protocol付きで起動していること"],
+                expected_outcome="Xの投稿欄に本文が入り、投稿操作が完了します。",
+                confidence=0.82,
+                shell_kind="powershell",
+                shell_command=self._x_post_cdp_command(post_text, submit=self._social_goal_requires_submit(goal)),
+                shell_detach=False,
+                shell_timeout_seconds=45,
+                expected_signals=[ExpectedSignal(ExpectedSignalKind.DOM_MUTATION, target="X post composer")],
+                wait_timeout_ms=5000,
+            ),
+            reasoning="Use CDP Runtime.evaluate to focus the X composer, insert text, and press the post button.",
+        )
+
+    def _x_post_cdp_command(self, post_text: str, *, submit: bool) -> str:
+        return "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                f"$postText = {self._ps_single_quote(post_text)}",
+                f"$shouldSubmit = {'$true' if submit else '$false'}",
+                "$jsonText = ConvertTo-Json $postText -Compress",
+                "$jsonSubmit = if ($shouldSubmit) { 'true' } else { 'false' }",
+                "$tabs = Invoke-RestMethod -Uri 'http://127.0.0.1:9222/json/list' -TimeoutSec 3",
+                "$tab = @($tabs | Where-Object { $_.type -eq 'page' -and ($_.url -match 'https?://(x|twitter)\\.com') } | Select-Object -First 1)",
+                "if (-not $tab) { $tab = @($tabs | Where-Object { $_.type -eq 'page' } | Select-Object -First 1) }",
+                "if (-not $tab -or -not $tab.webSocketDebuggerUrl) { throw 'DevTools Protocol target is unavailable. Launch Chrome from AutoCruise first.' }",
+                "$js = @\"",
+                "(async () => {",
+                "  const text = __TEXT_JSON__;",
+                "  const shouldSubmit = __SUBMIT_JSON__;",
+                "  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
+                "  const visible = (el) => {",
+                "    if (!el) return false;",
+                "    const style = getComputedStyle(el);",
+                "    const rect = el.getBoundingClientRect();",
+                "    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;",
+                "  };",
+                "  if (!/(^|\\.)x\\.com$|(^|\\.)twitter\\.com$/.test(location.hostname)) {",
+                "    location.href = 'https://x.com/compose/post';",
+                "    await sleep(3500);",
+                "  }",
+                "  let editor = null;",
+                "  const selectors = [",
+                "    'div[data-testid=\"tweetTextarea_0\"][contenteditable=\"true\"]',",
+                "    'div[role=\"textbox\"][contenteditable=\"true\"][data-testid^=\"tweetTextarea\"]',",
+                "    'div[role=\"textbox\"][contenteditable=\"true\"]',",
+                "    '[aria-label*=\"Post text\"][contenteditable=\"true\"]',",
+                "    '[aria-label*=\"Tweet text\"][contenteditable=\"true\"]'",
+                "  ];",
+                "  for (let i = 0; i < 50 && !editor; i += 1) {",
+                "    for (const selector of selectors) {",
+                "      const candidates = Array.from(document.querySelectorAll(selector)).filter(visible);",
+                "      if (candidates.length) { editor = candidates[0]; break; }",
+                "    }",
+                "    if (!editor) await sleep(250);",
+                "  }",
+                "  if (!editor) throw new Error('X composer textbox was not found.');",
+                "  editor.focus();",
+                "  document.getSelection()?.selectAllChildren(editor);",
+                "  document.execCommand('delete', false, null);",
+                "  document.execCommand('insertText', false, text);",
+                "  editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));",
+                "  await sleep(600);",
+                "  let submitted = false;",
+                "  if (shouldSubmit) {",
+                "    const buttonSelectors = ['button[data-testid=\"tweetButton\"]', 'button[data-testid=\"tweetButtonInline\"]'];",
+                "    for (let i = 0; i < 20 && !submitted; i += 1) {",
+                "      let buttons = buttonSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));",
+                "      if (!buttons.length) { buttons = Array.from(document.querySelectorAll('button[role=\"button\"]')); }",
+                "      const button = buttons.find((candidate) => {",
+                "        const label = `${candidate.getAttribute('aria-label') || ''} ${candidate.innerText || ''}`;",
+                "        return visible(candidate) && !candidate.disabled && !candidate.getAttribute('aria-disabled') && /(Post|Tweet|ポスト|投稿)/i.test(label);",
+                "      });",
+                "      if (button) { button.click(); submitted = true; break; }",
+                "      await sleep(250);",
+                "    }",
+                "    if (!submitted) throw new Error('X post button was not found or was disabled.');",
+                "  }",
+                "  return { ok: true, submitted, textLength: text.length, url: location.href };",
+                "})()",
+                "\"@",
+                "$js = $js.Replace('__TEXT_JSON__', $jsonText).Replace('__SUBMIT_JSON__', $jsonSubmit)",
+                "$payload = @{ id = 1; method = 'Runtime.evaluate'; params = @{ expression = $js; awaitPromise = $true; returnByValue = $true } } | ConvertTo-Json -Depth 20 -Compress",
+                "$ws = [System.Net.WebSockets.ClientWebSocket]::new()",
+                "$ws.ConnectAsync([Uri]$tab.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult()",
+                "try {",
+                "  $bytes = [Text.Encoding]::UTF8.GetBytes($payload)",
+                "  $ws.SendAsync([ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult()",
+                "  $buffer = New-Object byte[] 65536",
+                "  $stream = [IO.MemoryStream]::new()",
+                "  do {",
+                "    $result = $ws.ReceiveAsync([ArraySegment[byte]]::new($buffer), [Threading.CancellationToken]::None).GetAwaiter().GetResult()",
+                "    if ($result.Count -gt 0) { $stream.Write($buffer, 0, $result.Count) }",
+                "  } while (-not $result.EndOfMessage)",
+                "  $response = [Text.Encoding]::UTF8.GetString($stream.ToArray()) | ConvertFrom-Json",
+                "  if ($response.error) { throw ($response.error.message | Out-String) }",
+                "  if ($response.result.exceptionDetails) { throw ($response.result.exceptionDetails.exception.description -as [string]) }",
+                "  $value = $response.result.result.value",
+                "  if (-not $value.ok) { throw 'X CDP post action did not report success.' }",
+                "  Write-Output ('X CDP post action completed. submitted=' + $value.submitted + ' textLength=' + $value.textLength)",
+                "} finally {",
+                "  if ($ws.State -eq [System.Net.WebSockets.WebSocketState]::Open) { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'done', [Threading.CancellationToken]::None).GetAwaiter().GetResult() }",
+                "  $ws.Dispose()",
+                "}",
+            ]
+        )
+
     def _requested_launch_app(self, goal: str, retrieved_context) -> str:
         explicit_matches = self._goal_launch_candidates(goal)
         if explicit_matches:
@@ -970,6 +1287,123 @@ class WindowsAgentToolset:
             if any(term in goal_lower for term in spec["terms"]):
                 return app_name
         return ""
+
+    def _looks_like_x_goal(self, goal: str) -> bool:
+        normalized = self._normalize_text(goal)
+        if "x.com" in normalized or "twitter" in normalized:
+            return True
+        return bool(re.search(r"(^|[^a-z0-9])x([^a-z0-9]|$)", str(goal or ""), flags=re.IGNORECASE))
+
+    def _looks_like_social_post_goal(self, goal: str) -> bool:
+        normalized = self._normalize_text(goal)
+        return any(
+            token in normalized
+            for token in (
+                "post",
+                "tweet",
+                "write",
+                "compose",
+                "send",
+                "投稿",
+                "ポスト",
+                "ツイート",
+                "書き込",
+                "書いて",
+                "書く",
+                "送信",
+            )
+        )
+
+    def _social_goal_requires_submit(self, goal: str) -> bool:
+        normalized = self._normalize_text(goal)
+        return any(token in normalized for token in ("post", "tweet", "send", "投稿", "ポスト", "ツイート", "書き込", "送信"))
+
+    def _social_post_text(self, goal: str) -> str:
+        requested = self._extract_requested_text(goal) or self._extract_explicit_text(goal)
+        if requested:
+            return requested[:280]
+        if self._goal_prefers_japanese(goal):
+            return (
+                "AutoCruise CEの動作テストです。"
+                "Windows上の作業を自律的に進め、ブラウザ操作も直接扱えるよう改善しています。"
+            )
+        return "Testing AutoCruise CE browser automation. It can now operate web apps more directly from Windows tasks."
+
+    def _requested_launch_query(self, goal: str, retrieved_context) -> str:
+        if retrieved_context and getattr(retrieved_context, "app_candidates", None):
+            for candidate in retrieved_context.app_candidates:
+                query = self._clean_app_query(candidate)
+                if query and query not in APP_LAUNCH_SPECS:
+                    return query
+
+        goal_text = str(goal or "").strip()
+        context_match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9 ._+\-]{1,60}?)で", goal_text)
+        if context_match:
+            query = self._clean_app_query(context_match.group(1))
+            if query:
+                return query
+
+        if not self._has_launch_intent(goal_text):
+            return ""
+
+        patterns = (
+            r"\b(?:open|launch|start|run)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9 ._+\-]{1,60}?)(?:\s+(?:and|to|for|with|then)\b|[,.。、]|$)",
+            r"([^。．、,\n\r]{1,60}?)(?:を|で)?(?:開いて|開く|起動して|起動|立ち上げて|立ち上げる)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, goal_text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            query = self._clean_app_query(match.group(1))
+            if query and self._normalize_text(query) not in {self._normalize_text(key) for key in APP_LAUNCH_SPECS}:
+                return query
+        return ""
+
+    def _has_launch_intent(self, goal: str) -> bool:
+        normalized = self._normalize_text(goal)
+        return any(
+            token in normalized
+            for token in (
+                "open",
+                "launch",
+                "start",
+                "run",
+                "開いて",
+                "開く",
+                "起動",
+                "立ち上げ",
+            )
+        )
+
+    def _clean_app_query(self, value: str) -> str:
+        query = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n\"'“”「」『』（）()[]【】")
+        query = re.sub(r"\b(?:app|application)\b$", "", query, flags=re.IGNORECASE).strip()
+        query = re.sub(r"(?:アプリ|ソフト)$", "", query).strip()
+        if not query or len(query) > 60:
+            return ""
+        normalized = self._normalize_text(query)
+        blocked = {
+            "app",
+            "application",
+            "software",
+            "program",
+            "windows",
+            "something",
+            "anything",
+            "browser",
+            "アプリ",
+            "ソフト",
+        }
+        if normalized in {self._normalize_text(item) for item in blocked}:
+            return ""
+        return query
+
+    def _generic_app_display(self, app_query: str) -> str:
+        return self._clean_app_query(app_query) or str(app_query or "").strip() or "Application"
+
+    def _generic_app_marker(self, app_query: str) -> str:
+        marker = re.sub(r"[^a-z0-9]+", "-", self._normalize_text(app_query)).strip("-")
+        return marker or "app"
 
     def _goal_launch_candidates(self, goal: str) -> list[str]:
         normalized_goal = self._normalize_text(goal)

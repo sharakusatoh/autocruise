@@ -51,6 +51,7 @@ class AgentToolset(Protocol):
     def focus_window(self, window_id: int) -> bool: ...
     def find_elements(self, query: str): ...
     def plan_next_action(self, goal: str, observation, recent_actions: list[Action], context=None) -> PlanStep: ...
+    def plan_initial_action(self, goal: str, context=None) -> PlanStep | None: ...
     def verify_target(self, action: Action, observation): ...
     def execute_action(self, action: Action): ...
     def wait_for_expected_change(self, session_id: str, action: Action, previous_observation, *, recent_actions: list[str] | None = None, execution_result=None): ...
@@ -132,6 +133,67 @@ class SessionOrchestrator:
             confirmation_notes: list[str] = []
             allow_postcheck_observation_reuse = bool(getattr(toolset, "reuse_postcheck_observation", True))
             reuse_postcheck_observation = False
+            initial_plan = self._plan_initial_action(toolset, instruction, context, autonomy_mode)
+            if initial_plan is not None and initial_plan.action is not None and not initial_plan.is_complete:
+                snapshot = self._transition(
+                    snapshot,
+                    SessionState.PLANNING,
+                    PlanningData(goal=instruction),
+                    "Plan initial direct action",
+                )
+                self._emit("plan", {"plan": initial_plan})
+                action = initial_plan.action
+                snapshot.last_action = action
+                snapshot.summary = initial_plan.summary
+                snapshot = self._transition(
+                    snapshot,
+                    SessionState.PRECHECK,
+                    PrecheckData(action_summary=initial_plan.summary),
+                    "Resolve initial direct action",
+                )
+                verification = toolset.verify_target(action, None)
+                if verification.matched:
+                    snapshot = self._transition(
+                        snapshot,
+                        SessionState.EXECUTING,
+                        ExecutingData(action_summary=initial_plan.summary),
+                        "Execute initial direct action before observing",
+                    )
+                    execution = toolset.execute_action(action)
+                    self._log_execution_attempt(session_id, instruction, action, execution)
+                    if execution.success:
+                        recent_actions.append(action)
+                        step_count += 1
+                        snapshot = self._transition(
+                            snapshot,
+                            SessionState.POSTCHECK,
+                            PostcheckData(action_summary=initial_plan.summary),
+                            "Initial direct action executed",
+                        )
+                    else:
+                        last_failure_reason = execution.error or execution.details
+                        replans += 1
+                        snapshot = self._transition(
+                            snapshot,
+                            SessionState.REPLANNING,
+                            ReplanningData(failure_reason=last_failure_reason, attempt=replans),
+                            "Initial direct action failed; replanning",
+                        )
+                        context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=last_failure_reason)
+                        snapshot.retrieved_context = context
+                        self._log_retrieval(session_id, context)
+                else:
+                    last_failure_reason = verification.reason
+                    replans += 1
+                    snapshot = self._transition(
+                        snapshot,
+                        SessionState.REPLANNING,
+                        ReplanningData(failure_reason=verification.reason, attempt=replans),
+                        "Initial direct action precheck failed; replanning",
+                    )
+                    context = self.retrieval.retrieve(instruction, stage="replan", failure_reason=verification.reason)
+                    snapshot.retrieved_context = context
+                    self._log_retrieval(session_id, context)
 
             while True:
                 if self._stop_requested:
@@ -249,6 +311,7 @@ class SessionOrchestrator:
                 )
                 execution = toolset.execute_action(action)
                 if not execution.success:
+                    self._log_execution_attempt(session_id, instruction, action, execution)
                     failure_reason = execution.error or execution.details
                     last_failure_reason = failure_reason
                     replans += 1
@@ -357,6 +420,35 @@ class SessionOrchestrator:
             target = action.target.name or action.target.window_title or action.target.automation_id
             labels.append(f"{action.type.value}:{target}")
         return labels
+
+    def _plan_initial_action(self, toolset: AgentToolset, instruction: str, context, autonomy_mode: str) -> PlanStep | None:
+        planner = getattr(toolset, "plan_initial_action", None)
+        if not callable(planner):
+            return None
+        return planner(
+            instruction,
+            {
+                "retrieved_context": context,
+                "autonomy_mode": autonomy_mode,
+                "confirmation_policy": "Use autonomous judgment. Keep executing until the goal is complete.",
+            },
+        )
+
+    def _log_execution_attempt(self, session_id: str, instruction: str, action: Action, execution) -> None:
+        self.logger.execution(
+            {
+                "session_id": session_id,
+                "instruction": instruction,
+                "action": asdict(action),
+                "execution": asdict(execution),
+                "validation": {
+                    "success": bool(execution.success),
+                    "confidence": 0.0,
+                    "details": execution.details if execution.success else execution.error or execution.details,
+                },
+                "timestamp": utc_now(),
+            }
+        )
 
     def _emit(self, kind: str, payload: dict) -> None:
         if self.event_sink is not None:

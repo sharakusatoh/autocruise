@@ -3,7 +3,7 @@ from __future__ import annotations
 
 APP_NAME = "AutoCruiseCE"
 APP_TITLE = "AutoCruise CE"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 COMPANY_NAME = "Sharaku Satoh"
 PRODUCT_NAME = "AutoCruise CE"
 COPYRIGHT = "Copyright (c) 2026 Sharaku Satoh"

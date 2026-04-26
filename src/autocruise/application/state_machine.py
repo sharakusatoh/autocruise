@@ -20,6 +20,7 @@ ALLOWED_TRANSITIONS: dict[SessionState, set[SessionState]] = {
     SessionState.IDLE: {SessionState.LOADING_CONTEXT},
     SessionState.LOADING_CONTEXT: {
         SessionState.OBSERVING,
+        SessionState.PLANNING,
         SessionState.FAILED,
         SessionState.STOPPED,
     },

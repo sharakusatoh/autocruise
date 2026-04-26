@@ -285,6 +285,8 @@ class SchedulesPage(QWidget):
         self.random_runs_edit.setVisible(is_random_daily)
 
     def _sync_action_buttons(self, has_selection: bool, enabled: bool) -> None:
+        self.enable_button.setVisible(not has_selection or not enabled)
+        self.disable_button.setVisible(has_selection and enabled)
         self.enable_button.setEnabled(has_selection and not enabled)
         self.disable_button.setEnabled(has_selection and enabled)
         self.delete_button.setEnabled(has_selection)

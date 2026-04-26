@@ -939,7 +939,7 @@ class MainWindow(QMainWindow):
         result_map = {
             SessionState.COMPLETED: ScheduledJobState.COMPLETED,
             SessionState.FAILED: ScheduledJobState.FAILED,
-            SessionState.STOPPED: ScheduledJobState.FAILED,
+            SessionState.STOPPED: ScheduledJobState.SKIPPED,
         }
         result = result_map.get(snapshot.state, ScheduledJobState.FAILED)
         message = getattr(snapshot.payload, "summary", "") or sanitize_user_message(getattr(snapshot.payload, "reason", ""))
@@ -1189,8 +1189,12 @@ class MainWindow(QMainWindow):
 
     def _stop_session(self) -> None:
         if self._is_session_active():
+            task_id = self.active_task_id
+            trigger = self.active_trigger
             self.orchestrator.stop()
             self.codex_app_server.cancel_active_turn()
+            if trigger == "scheduled" and task_id:
+                self._stop_schedule_for_user_stop(task_id)
             self._set_status(tr("status.stopped"), "error", tr("message.phase_stopped"), self.current_connection)
             self._update_pause_controls()
 
@@ -1437,6 +1441,26 @@ class MainWindow(QMainWindow):
         except TaskSchedulerError as exc:
             self._show_notice(
                 f"{tr('message.schedule_scheduler_error')}\n{sanitize_user_message(str(exc))}",
+                tone="error",
+                timeout_ms=8000,
+            )
+
+    def _stop_schedule_for_user_stop(self, task_id: str) -> None:
+        if not task_id:
+            return
+        scheduler_error = ""
+        try:
+            self.task_scheduler.stop_job(task_id)
+            self.task_scheduler.set_enabled(task_id, False)
+        except TaskSchedulerError as exc:
+            scheduler_error = sanitize_user_message(str(exc)) or str(exc)
+        self.job_repo.set_enabled(task_id, False)
+        self.pending_task_queue.clear()
+        self._log_schedule_event(task_id, "stopped_by_user", tr("message.schedule_stopped_by_user"))
+        self._refresh_schedules()
+        if scheduler_error:
+            self._show_notice(
+                f"{tr('message.schedule_scheduler_error')}\n{scheduler_error}",
                 tone="error",
                 timeout_ms=8000,
             )
